@@ -1,0 +1,414 @@
+import * as B from './budget.js';
+import { refreshMarket, refreshNews } from './market.js';
+
+const KEY = 'budget.v1';
+const app = document.getElementById('app');
+const today = () => new Date().toLocaleDateString('sv-SE'); // local YYYY-MM-DD
+const view = { tab: 'dash', month: B.monthOf(today()), account: '', edit: null, preview: null };
+let S = load();
+
+function load() {
+  const raw = localStorage.getItem(KEY);
+  if (!raw) return B.emptyState();
+  try { return B.validateState(JSON.parse(raw)); } catch {
+    localStorage.setItem(KEY + '.illisible', raw); // keep the unreadable copy rather than overwrite it
+    alert('Données locales illisibles, mises de côté. Restaurez une sauvegarde.');
+    return B.emptyState();
+  }
+}
+const save = () => localStorage.setItem(KEY, JSON.stringify(S));
+
+// ---- formatting helpers ----
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const eur = c => (c / 100).toLocaleString('fr-FR', { style: 'currency', currency: 'EUR' });
+const money = c => `<span class="${c < 0 ? 'neg' : c > 0 ? 'pos' : ''}">${eur(c)}</span>`;
+const euros = c => (c ? String(c / 100).replace('.', ',') : '');
+const parseEur = v => {
+  const t = String(v ?? '').replace(/[\s €]/g, '').replace(',', '.'), n = t === '' ? 0 : Math.round(Number(t) * 100);
+  if (!Number.isFinite(n)) throw new Error('Montant invalide');
+  return n;
+};
+const positive = v => { const n = parseEur(v); if (n <= 0) throw new Error('Montant invalide'); return n; };
+const decimal = v => { const n = Number(String(v).replace(/[\s ]/g, '').replace(',', '.')); if (!(n > 0)) throw new Error('Nombre invalide'); return n; };
+const num = n => n.toLocaleString('fr-FR', { maximumFractionDigits: 6 });
+const accName = id => S.accounts.find(a => a.id === id)?.name ?? '?';
+const catName = id => S.categories.find(c => c.id === id)?.name ?? '';
+const opts = (items, sel, empty) => (empty != null ? `<option value="">${empty}</option>` : '')
+  + items.map(([v, t]) => `<option value="${esc(v)}"${v === sel ? ' selected' : ''}>${esc(t)}</option>`).join('');
+const accOpts = (sel, empty) => opts(S.accounts.map(a => [a.id, `${a.name} · ${a.institution}`]), sel, empty);
+const catOpts = sel => opts(S.categories.map(c => [c.id, c.name]), sel, '— catégorie —');
+const row = (label, c, cls = '') => `<div class="row ${cls}"><span>${label}</span>${money(c)}</div>`;
+const card = (title, body, cls = '') => `<section class="card ${cls}"><h2>${title}</h2>${body}</section>`;
+const empty = t => `<div class="muted">${t}</div>`;
+const monthBar = () => `<div class="grid2" style="margin-bottom:12px"><input type="month" value="${view.month}" data-change="month" aria-label="Mois">`
+  + `<select data-change="account" aria-label="Filtrer par compte">${accOpts(view.account, 'Tous les comptes')}</select></div>`;
+const btn = (act, id, text, cls = 'small ghost') => `<button class="${cls}" data-act="${act}" data-id="${esc(id)}">${text}</button>`;
+
+function opItem(o) {
+  const tags = [o.planned && 'prévue', o.plannedId && 'rapprochée', o.transferId && 'virement interne', o.envelopeId && 'achat bourse', o.kind === 'refund' && 'remboursement'].filter(Boolean);
+  const act = o.transferId ? btn('unlink', o.transferId, 'Délier') + btn('del', o.id, 'Suppr.', 'small danger')
+    : o.envelopeId ? btn('del', o.id, 'Suppr.', 'small danger') : btn('edit', o.id, 'Modifier');
+  return `<div class="op"><div class="l">${esc(o.label || B.KINDS[o.kind])}${tags.map(t => `<span class="tag">${t}</span>`).join('')}`
+    + `<div class="muted">${o.date} · ${esc(accName(o.accountId))}${o.categoryId ? ' · ' + esc(catName(o.categoryId)) : ''}</div></div>`
+    + `<div class="r">${money(o.amount)}<div class="actions">${act}</div></div></div>`;
+}
+
+const bar = (name, spent, cap) => `<div style="padding:4px 0"><div class="row" style="border:0;padding:0"><span>${esc(name)}</span><span>${eur(spent)}${cap ? ` / ${eur(cap)}` : ''}</span></div>`
+  + (cap ? `<div class="bar"><i class="${spent > cap ? 'over' : ''}" style="width:${Math.max(0, Math.min(100, (spent * 100) / cap))}%"></i></div>` : '') + '</div>';
+
+const onboarding = () => card('Bienvenue', empty('Aucun compte pour l’instant. Créez vos comptes et établissements, ou essayez avec des données fictives.')
+  + `<div class="grid2" style="margin-top:8px"><button data-tab="settings">Créer un compte</button><button class="ghost" data-act="demo">Charger la démo</button></div>`);
+
+// ---- views ----
+const views = {
+  dash() {
+    const m = view.month, st = B.monthStats(S, m), al = B.alerts(S, m), stale = B.staleAccounts(S, today()), up = B.upcoming(S, m);
+    const liquid = S.accounts.filter(a => a.liquid);
+    const cats = B.categorySpend(S, m, view.account).filter(c => c.spent || c.cap);
+    return monthBar()
+      + `<section class="card hero"><div class="muted">Dépensable ce mois</div><div class="big">${eur(st.spendable)}</div>`
+      + (st.shortfall ? `<div class="bad">Manque : ${eur(st.shortfall)}</div>` : '') + `<div class="muted">Reste prévu − réserve − bourse</div></section>`
+      + (al.length ? card('Alertes', al.map(a => `<div class="row"><span class="${a.pct >= 100 ? 'bad' : 'warn'}">${esc(a.label)} : seuil ${a.pct} % atteint (${eur(a.spent)} / ${eur(a.cap)})</span>${btn('dismiss', a.id, 'OK')}</div>`).join('')) : '')
+      + card('Mois', row('Revenus encaissés', st.income) + row('Dépenses payées', -st.spent) + row('Reste à date', st.toDate, 'total')
+        + row('Revenus attendus', st.expectedIncome) + row('Dépenses attendues', -st.expectedSpent) + row('Reste prévu fin de mois', st.forecast, 'total')
+        + row('Réserve mensuelle', -st.reserve) + row('Enveloppes bourse', -st.stock) + row('Dépensable', st.spendable, 'total'))
+      + card('Bilan de fin de mois', row('Résultat réel (encaissé − payé)', st.toDate, 'total') + row('Transféré vers l’épargne (net des retraits)', st.savedTransfer)
+        + empty('La réserve prévue n’est pas comptée comme épargne transférée.'))
+      + card('Liquidités', (liquid.map(a => row(`${esc(a.name)} <span class="muted">${esc(a.institution)}</span>`, B.balance(S, a))).join('')
+        + row('Total', liquid.reduce((t, a) => t + B.balance(S, a), 0), 'total')))
+      + card('Dépenses par catégorie' + (view.account ? ` · ${esc(accName(view.account))}` : ''),
+        (!view.account && S.settings.globalCap ? bar('Total du mois', st.spent, S.settings.globalCap) : '')
+        + (cats.map(c => bar(c.name, c.spent, c.cap)).join('') || empty('Aucune dépense.')))
+      + card('Prochaines échéances', up.map(opItem).join('') || empty('Rien de prévu.'))
+      + card('Fraîcheur des données', `<div class="row"><span>Dernier import</span><span>${S.lastImport ? `${S.lastImport.date} · ${esc(accName(S.lastImport.accountId))} (${S.lastImport.count})` : 'aucun'}</span></div>`
+        + (stale.map(x => `<div class="row"><span class="warn">${esc(x.a.name)}</span><span class="warn">${x.last ? 'dernière opération ' + x.last : 'aucune opération'}</span></div>`).join('')
+          || `<div class="muted good">Tous les comptes ont une opération de moins de 30 jours.</div>`));
+  },
+
+  ops() {
+    const e = view.edit && S.ops.find(o => o.id === view.edit);
+    const list = S.ops.filter(o => B.monthOf(o.date) === view.month && (!view.account || o.accountId === view.account)).sort((a, b) => b.date.localeCompare(a.date));
+    const pairs = B.transferCandidates(S);
+    return monthBar()
+      + card(e ? 'Modifier l’opération' : 'Nouvelle opération', `<form data-form="op">
+        <div class="grid2"><select name="kind">${opts([['expense', 'Dépense'], ['income', 'Revenu'], ['refund', 'Remboursement']], e?.kind ?? 'expense')}</select>
+        <input name="amount" inputmode="decimal" placeholder="Montant €" required value="${e ? euros(Math.abs(e.amount)) : ''}"></div>
+        <div class="grid2"><select name="accountId">${accOpts(e?.accountId ?? view.account)}</select><input type="date" name="date" required value="${e?.date ?? today()}"></div>
+        <select name="categoryId">${catOpts(e?.categoryId)}</select>
+        <input name="label" placeholder="Libellé" value="${esc(e?.label)}">
+        <label class="chk"><input type="checkbox" name="planned"${e?.planned ? ' checked' : ''}> Prévue (pas encore payée ou encaissée)</label>
+        <button>${e ? 'Enregistrer' : 'Ajouter'}</button>
+        ${e ? `<div class="grid2"><button type="button" class="ghost" data-act="cancel">Annuler</button>${btn('del', e.id, 'Supprimer', 'danger')}</div>` : ''}</form>`)
+      + card('Virement entre comptes', `<form data-form="transfer"><div class="grid2"><select name="from" aria-label="De">${accOpts()}</select><select name="to" aria-label="Vers">${accOpts(S.accounts[1]?.id)}</select></div>
+        <div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant €" required><input type="date" name="date" required value="${today()}"></div>
+        <button>Enregistrer le virement</button>${empty('Exclu des revenus et des dépenses du foyer.')}</form>`)
+      + (pairs.length ? card('Virements détectés', pairs.map(([o, i]) => `<div class="op"><div class="l">${esc(o.label)} → ${esc(i.label)}<div class="muted">${o.date} ${esc(accName(o.accountId))} → ${i.date} ${esc(accName(i.accountId))}</div></div>`
+        + `<div class="r">${eur(i.amount)}<div class="actions">${btn('link', `${o.id}|${i.id}`, 'Lier', 'small')}${btn('notLink', `${o.id}|${i.id}`, 'Ignorer')}</div></div></div>`).join(''), 'warn-card') : '')
+      + card('Importer un relevé (CSV)', importBlock())
+      + card(`Opérations · ${list.length}`, list.map(opItem).join('') || empty('Aucune opération ce mois.'));
+  },
+
+  plan() {
+    const m = view.month, up = B.upcoming(S, m), matched = S.ops.filter(o => o.plannedId && B.monthOf(o.date) === m);
+    return monthBar()
+      + card('À rapprocher', up.map(p => {
+        const c = B.matchCandidates(S, p);
+        return opItem(p) + (c.length ? `<form data-form="match" class="grid2" style="grid-template-columns:1fr auto;margin:4px 0 8px"><input type="hidden" name="plannedId" value="${p.id}">`
+          + `<select name="realId" aria-label="Opération réelle">${opts(c.map(o => [o.id, `${o.date} ${o.label} ${eur(o.amount)}`]))}</select><button class="small">Rapprocher</button></form>` : '');
+      }).join('') || empty('Aucune opération prévue en attente.'))
+      + card('Rapprochées', matched.map(o => `<div class="op"><div class="l">${esc(o.label)} ↔ ${esc(S.ops.find(x => x.id === o.plannedId)?.label)}<div class="muted">${o.date}</div></div>`
+        + `<div class="r">${money(o.amount)}<div class="actions">${btn('unmatch', o.plannedId, 'Annuler')}</div></div></div>`).join('') || empty('Aucune.'))
+      + card('Échéances récurrentes (mensuelles)', S.recurring.map(r => `<div class="op"><div class="l">${esc(r.label)}<div class="muted">le ${r.day} · ${esc(accName(r.accountId))}${r.categoryId ? ' · ' + esc(catName(r.categoryId)) : ''}</div></div>`
+        + `<div class="r">${money(B.signed(r.kind, r.cents))}<div class="actions">${btn('delRec', r.id, 'Suppr.', 'small danger')}</div></div></div>`).join('')
+        + `<button data-act="gen" style="margin:8px 0">Générer les échéances de ${view.month}</button>
+        <form data-form="rec"><div class="grid2"><select name="kind">${opts([['expense', 'Dépense'], ['income', 'Revenu']], 'expense')}</select><input name="amount" inputmode="decimal" placeholder="Montant €" required></div>
+        <div class="grid2"><select name="accountId">${accOpts()}</select><input name="day" type="number" min="1" max="31" placeholder="Jour du mois" required></div>
+        <select name="categoryId">${catOpts()}</select><input name="label" placeholder="Libellé (loyer, abonnement…)" required><button class="ghost">Ajouter une échéance</button></form>`);
+  },
+
+  stock() {
+    const envs = S.envelopes.filter(e => e.month === view.month), open = envs.filter(e => B.envelopeLeft(S, e) > 0);
+    const lines = B.valuation(S, today()), mk = S.settings.market, held = new Set(lines.map(l => l.isin));
+    const brokers = S.accounts.filter(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
+    const total = ls => ls.reduce((t, l) => t + (l.value ?? 0), 0), missing = lines.filter(l => l.value == null).length;
+    const quoteInfo = (q, inst) => (q ? `${num(q.price)} ${inst.currency} · ${q.asOf} · ${esc(q.source)}` : 'cours indisponible');
+    const staleTag = on => (on ? '<span class="tag warn">périmé</span>' : '');
+    const link = (isin, name) => `<a href="#" data-act="inst" data-id="${esc(isin)}">${esc(name)}</a>`;
+    const line = l => `<div class="op"><div class="l">${link(l.isin, l.inst.name)}${staleTag(l.stale)}<div class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}`
+      + `${l.fx ? ` · 1 € = ${num(l.fx.rate)} ${l.inst.currency} (${esc(l.fx.source)}, ${l.fx.asOf})` : ''}</div>`
+      + `<div class="muted">${esc(l.inst.isin)}${l.inst.place ? ' · ' + esc(l.inst.place) : ''} · prix de revient ${eur(l.cost)}</div></div>`
+      + `<div class="r">${l.value == null ? '<span class="warn">non valorisé</span>' : eur(l.value)}${l.gain != null ? `<div>${money(l.gain)}</div>` : ''}</div></div>`;
+    const instOpts = list => opts(list.map(i => [i.isin, `${i.name} (${i.isin})`]));
+    const pf = S.settings.profile, sug = B.suggestions(S, today());
+    const actCls = { Acheter: 'good', Renforcer: 'good', Alléger: 'warn', Sécuriser: 'warn', 'Vendre ou revoir': 'bad', Attendre: 'muted', Suspendu: 'muted' };
+    const sheet = isin => {
+      const i = S.instruments.find(x => x.isin === isin);
+      if (!i) return '';
+      const q = S.quotes[isin], why = sug.filter(x => x.isin === isin), news = B.newsFor(S, isin);
+      return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
+        `<div class="muted">${esc(i.isin)} · ${esc(i.place || 'place non renseignée')} · ${i.currency} · symbole cours ${esc(i.symbol || '—')} · symbole actualités ${esc(i.newsSymbol || '—')}</div>`
+        + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(B.isStale(q?.asOf, today()))}</span></div>`
+        + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s)</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
+        + '<h2 style="margin-top:10px">Pourquoi il ressort</h2>'
+        + (why.map(x => `<div><b class="${actCls[x.action] ?? ''}">${esc(x.action)}</b> · ${esc(x.reason)} <span class="muted">(${esc(x.rule)})</span></div>`).join('') || empty('Aucune règle déclenchée.'))
+        + '<h2 style="margin-top:10px">Actualités</h2>'
+        + (news.map(n => `<div class="op${B.isOldNews(n, today()) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
+          + `<div class="muted">${esc(n.source)} · ${n.publishedAt}</div></div></div>`).join('') || empty('Aucune actualité.'))
+        + empty(S.newsFetched[isin] ? `Actualités mises à jour en ligne le ${S.newsFetched[isin]}.` : 'Actualités jamais mises à jour en ligne.'));
+    };
+    return monthBar() + (view.inst ? sheet(view.inst) : '')
+      + card('Suggestions', (sug.map(x => `<div class="op" style="display:block"><div><b class="${actCls[x.action] ?? ''}">${esc(x.action)}</b> · ${x.isin ? link(x.isin, x.name) : esc(x.name)}</div><div>${esc(x.reason)}</div>`
+        + `<div class="muted">Règle : ${esc(x.rule)}</div>`
+        + x.figures.map(f => `<div class="muted">${esc(f.label)} : ${esc(f.value)}${f.asOf ? ` · ${f.asOf}` : ''}${f.source ? ` · ${esc(f.source)}` : ''}</div>`).join('')
+        + (x.risks ? `<div class="muted">Risques : ${esc(x.risks)}</div>` : '') + '</div>').join('') || empty('Aucune position ni enveloppe : rien à suggérer.'))
+        + `<div style="margin-top:6px"><b>${B.DISCLAIMER}</b></div>`)
+      + card('Portefeuille', (brokers.map(a => {
+        const ls = lines.filter(l => l.accountId === a.id);
+        return `<h2 style="margin-top:10px">${esc(a.name)} <span class="muted">${esc(a.institution)}</span></h2>` + row('Encaisse', B.balance(S, a))
+          + ls.map(line).join('') + row('Positions valorisées', total(ls), 'total');
+      }).join('') || empty('Aucune position. Ajoutez un instrument puis une position existante ou un achat.'))
+        + row('Total des positions (€)', total(lines), 'total')
+        + (missing ? `<div class="warn">${missing} ligne(s) sans cours ou sans taux de change, exclue(s) du total.</div>` : '')
+        + empty('Valorisation au dernier cours connu. Change : taux de référence BCE, pas le taux appliqué par le courtier. Consultation seule, aucun ordre n’est passé.'))
+      + card('Liste de suivi', S.instruments.filter(i => !held.has(i.isin)).map(i => {
+        const q = S.quotes[i.isin];
+        return `<div class="op"><div class="l">${link(i.isin, i.name)}${staleTag(B.isStale(q?.asOf, today()))}<div class="muted">${esc(i.isin)} · ${quoteInfo(q, i)}</div></div><div class="r">${btn('delInst', i.isin, 'Retirer', 'small danger')}</div></div>`;
+      }).join('') || empty('Aucun instrument suivi hors positions.'))
+      + card('Enveloppes du mois', envs.map(e => `<div class="op"><div class="l">${esc(e.label)}<div class="muted">${eur(e.amount)} affectés · ${eur(B.envelopeUsed(S, e.id))} achetés${e.released ? ' · reliquat libéré' : ''}</div></div>`
+        + `<div class="r">Reliquat ${eur(B.envelopeLeft(S, e))}<div class="actions">${B.envelopeLeft(S, e) > 0 ? btn('release', e.id, 'Libérer') : ''}</div></div></div>`).join('')
+        || empty('Aucune enveloppe ce mois (pas de renouvellement automatique).'))
+      + card('Nouvelle enveloppe', `<form data-form="env"><div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant €" required><input name="label" placeholder="Libellé" value="Enveloppe bourse"></div>
+        <button>Affecter à la bourse (${view.month})</button>${empty('Déduit immédiatement du dépensable du mois.')}</form>`)
+      + (open.length ? card('Saisir un achat', `<form data-form="buy"><select name="envId">${opts(open.map(e => [e.id, `${e.label} · reliquat ${eur(B.envelopeLeft(S, e))}`]))}</select>
+        <div class="grid2"><select name="accountId">${accOpts(S.accounts.find(a => /ibkr|trade|bourse|pea|cto/i.test(a.name + a.institution))?.id)}</select><input type="date" name="date" value="${today()}" required></div>
+        <div class="grid2"><select name="isin" aria-label="Instrument"><option value="">— instrument —</option>${instOpts(S.instruments)}</select><input name="qty" inputmode="decimal" placeholder="Quantité"></div>
+        <div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant frais inclus €" required><input name="label" placeholder="Libellé" required></div>
+        <button>Enregistrer l’achat</button>${empty('Achat déjà passé chez le courtier. Consomme le reliquat sans réduire une deuxième fois le dépensable.')}</form>`) : '')
+      + (S.instruments.length ? card('Saisir une opération titres', `<form data-form="holding"><div class="muted">Position détenue avant l’app (sans mouvement d’encaisse)</div>
+        <div class="grid2"><select name="accountId">${accOpts()}</select><select name="isin">${instOpts(S.instruments)}</select></div>
+        <div class="grid2"><input name="qty" inputmode="decimal" placeholder="Quantité" required><input name="cost" inputmode="decimal" placeholder="Prix de revient total €" required></div>
+        <input type="date" name="date" value="${today()}" required><button class="ghost">Ajouter la position</button></form><br>`
+        + (lines.length ? `<form data-form="sale"><div class="muted">Vente déjà passée chez le courtier (le produit reste sur le compte titres)</div>
+        <select name="pos">${opts(lines.map(l => [`${l.accountId}|${l.isin}`, `${accName(l.accountId)} · ${l.inst.name} (${num(l.qty)})`]))}</select>
+        <div class="grid2"><input name="qty" inputmode="decimal" placeholder="Quantité vendue" required><input name="amount" inputmode="decimal" placeholder="Montant net reçu €" required></div>
+        <input type="date" name="date" value="${today()}" required><button class="ghost">Enregistrer la vente</button></form>` : '')) : '')
+      + card('Importer un relevé courtier (CSV)', tradeImportBlock())
+      + card('Instruments', `<form data-form="instrument"><div class="grid2"><input name="isin" placeholder="ISIN" required autocapitalize="characters"><input name="name" placeholder="Nom"></div>
+        <div class="grid2"><input name="symbol" placeholder="Symbole Alpha Vantage (ex. CW8.PAR)" autocapitalize="characters"><input name="place" placeholder="Place (ex. Euronext Paris)"></div>
+        <div class="grid2"><input name="newsSymbol" placeholder="Symbole Marketaux (ex. TTE.PA)" autocapitalize="characters"><input name="currency" placeholder="Devise" value="EUR" required maxlength="3" autocapitalize="characters"></div>
+        <button class="ghost">Ajouter / mettre à jour</button></form>`
+        + (S.instruments.length ? `<br><form data-form="quote"><div class="muted">Cours saisi à la main (toujours possible, même hors ligne)</div><select name="isin">${instOpts(S.instruments)}</select>
+        <div class="grid2"><input name="price" inputmode="decimal" placeholder="Cours (devise de cotation)" required><input type="date" name="date" value="${today()}" required></div><button class="ghost">Enregistrer le cours</button></form>` : ''))
+      + card('Profil et allocation cible', `<form data-form="profile">
+        <div class="grid2"><label>Horizon (années)<input name="horizon" type="number" min="1" max="50" value="${pf.horizon}"></label>
+        <label>Risque<select name="risk">${opts(Object.entries(B.RISK).map(([k, r]) => [k, `${r.label} (stop ${r.trail} %, perte max ${r.maxLoss} %)`]), pf.risk)}</select></label></div>
+        <div class="grid2"><label>Écart toléré (points)<input name="driftPts" type="number" min="1" max="50" value="${pf.driftPts}"></label>
+        <label>Frais par ordre (€)<input name="fee" inputmode="decimal" value="${euros(pf.fee)}"></label></div>
+        <label>Coût de change hors EUR (%)<input name="fxPct" inputmode="decimal" value="${String(pf.fxPct).replace('.', ',')}"></label>
+        ${S.instruments.map(i => `<label>Cible ${esc(i.name)} (%)<input name="t_${esc(i.isin)}" inputmode="decimal" value="${pf.targets[i.isin] ?? ''}"></label>`).join('')}
+        <button class="ghost">Enregistrer</button>${empty('Le stop suiveur ne s’applique que si l’horizon est inférieur à 5 ans.')}</form>`)
+      + card('Données de marché', `<form data-form="market"><label class="chk"><input type="checkbox" name="enabled"${mk.enabled ? ' checked' : ''}> Activer l’actualisation en ligne (désactivée par défaut)</label>
+        <input type="password" name="avKey" placeholder="Clé Alpha Vantage gratuite (cours)" value="${esc(mk.avKey)}" autocomplete="off">
+        <input type="password" name="newsKey" placeholder="Clé Marketaux gratuite (actualités)" value="${esc(mk.newsKey)}" autocomplete="off"><button class="ghost">Enregistrer</button></form>
+        ${mk.enabled ? `<div class="grid2" style="margin-top:8px">${btn('refresh', '', 'Actualiser cours et change', '')}${btn('refreshNews', '', 'Actualiser les actualités', '')}</div>` : ''}
+        <details style="margin-top:8px"><summary>Données envoyées</summary>${empty('Cours : votre clé, votre adresse IP et les symboles suivis partent vers alphavantage.co (25 appels gratuits par jour, un appel par instrument et par jour au plus). Actualités : votre clé, votre IP et les symboles d’actualités vers marketaux.com (100 appels par jour, un par instrument et par jour au plus). Change : les devises, vers frankfurter.dev. Ne partent jamais : quantités, montants, comptes, opérations.')}
+        ${S.requestLog.slice(0, 10).map(r => `<div class="muted">${r.at.slice(0, 16).replace('T', ' ')} · ${esc(r.host)} · ${esc(r.symbols.join(', '))}</div>`).join('')}</details>`);
+  },
+
+  settings() {
+    const st = S.settings;
+    const accountForm = a => `<form data-form="account" style="padding:8px 0;border-bottom:1px solid var(--line)"><input type="hidden" name="id" value="${a?.id ?? ''}">
+      <div class="grid2"><input name="name" placeholder="Nom du compte" value="${esc(a?.name)}" required><input name="institution" placeholder="Établissement" value="${esc(a?.institution)}" required></div>
+      <input name="opening" inputmode="decimal" placeholder="Solde initial €" value="${a ? euros(a.opening) : ''}">
+      <label class="chk"><input type="checkbox" name="liquid"${!a || a.liquid ? ' checked' : ''}> Inclure dans les liquidités</label>
+      <label class="chk"><input type="checkbox" name="savings"${a?.savings ? ' checked' : ''}> Compte épargne</label>
+      <div class="grid2"><button class="${a ? 'ghost' : ''}">${a ? 'Enregistrer' : 'Ajouter le compte'}</button>${a ? btn('delAcc', a.id, 'Supprimer', 'danger') : ''}</div>
+      ${a ? empty('Solde actuel : ' + eur(B.balance(S, a))) : ''}</form>`;
+    const catForm = c => `<form data-form="cat" class="grid2" style="grid-template-columns:2fr 1fr auto${c ? ' auto' : ''};margin-bottom:6px"><input type="hidden" name="id" value="${c?.id ?? ''}">
+      <input name="name" value="${esc(c?.name)}" placeholder="Nouvelle catégorie" required aria-label="Nom"><input name="cap" inputmode="decimal" value="${c ? euros(c.cap) : ''}" placeholder="Plafond €" aria-label="Plafond mensuel">
+      <button class="small">${c ? 'OK' : 'Ajouter'}</button>${c ? btn('delCat', c.id, '×', 'small danger') : ''}</form>`;
+    return card('Budget', `<form data-form="settings"><label>Réserve mensuelle (€)<input name="reserve" inputmode="decimal" value="${euros(st.reserve)}"></label>
+        <label>Plafond mensuel global (€, vide = aucun)<input name="globalCap" inputmode="decimal" value="${euros(st.globalCap)}"></label>
+        <label>Seuil d’alerte (%)<input name="alertPct" type="number" min="1" max="100" value="${st.alertPct}"></label><button>Enregistrer</button></form>`)
+      + card('Comptes', S.accounts.map(accountForm).join('') + accountForm(null))
+      + card('Catégories et plafonds mensuels', S.categories.map(catForm).join('') + catForm(null))
+      + card('Sauvegarde', `<form data-form="backup"><input type="password" name="pw" placeholder="Mot de passe (8 caractères min.)" autocomplete="new-password" required>
+        <button>Télécharger une sauvegarde chiffrée</button></form><br>
+        <form data-form="restore"><input type="file" name="file" accept=".json,application/json" required><input type="password" name="pw" placeholder="Mot de passe de la sauvegarde" autocomplete="current-password" required>
+        <button class="ghost">Restaurer (remplace les données)</button></form><br>${btn('csv', '', 'Exporter les opérations (CSV)', 'ghost')}`)
+      + card('Données', empty('Tout est enregistré sur ce téléphone uniquement. Pensez à sauvegarder régulièrement.')
+        + `<div class="grid2" style="margin-top:8px">${btn('demo', '', 'Charger la démo', 'ghost')}${btn('reset', '', 'Tout effacer', 'danger')}</div>`);
+  },
+};
+
+function importBlock() {
+  const p = view.preview;
+  if (!p) return `<form data-form="importFile"><select name="accountId">${accOpts(view.account)}</select><input type="file" name="file" accept=".csv,text/csv" required>
+    <button>Aperçu</button>${empty('Colonnes reconnues : date, libellé, montant (ou débit / crédit). Rien n’est enregistré avant validation.')}</form>`;
+  return empty(`${esc(accName(p.accountId))} · ${p.rows.length} ligne(s)${p.errors.length ? ` · lignes illisibles ignorées : ${p.errors.join(', ')}` : ''}`)
+    + p.rows.map((r, i) => `<label class="op"><span class="l"><input type="checkbox" data-change="keep" data-id="${i}"${r.keep ? ' checked' : ''}> ${esc(r.label)}`
+      + `<span class="muted" style="display:block">${r.date}${r.dup ? ` · <span class="warn">doublon : ${r.dup}</span>` : ''}</span></span><span class="r">${money(r.amount)}</span></label>`).join('')
+    + `<div class="grid2">${btn('cancelImport', '', 'Annuler', 'ghost')}${btn('confirmImport', '', `Importer ${p.rows.filter(r => r.keep).length}`, '')}</div>`;
+}
+
+function tradeImportBlock() {
+  const p = view.trades;
+  if (!p) return `<form data-form="tradesFile"><select name="accountId">${accOpts(S.accounts.find(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id))?.id)}</select>
+    <input type="file" name="file" accept=".csv,text/csv" required><button>Aperçu</button>
+    ${empty('IBKR : Flex Query « Trades » au format CSV avec les champs CurrencyPrimary, FXRateToBase, AssetClass, Symbol, Description, ISIN, TradeID, TradeDate, Quantity, NetCash, Buy/Sell (devise de base EUR).')}
+    ${empty('Trade Republic, Fortuneo : remplissez le modèle depuis vos avis d’opéré. Montant net frais inclus, négatif pour un achat ; taux = euros pour 1 unité de devise, vide en EUR.')}</form>
+    <div style="margin-top:8px">${btn('template', '', 'Télécharger le modèle', 'ghost')}</div>`;
+  return empty(`${esc(accName(p.accountId))} · ${p.rows.length} opération(s)${p.errors.length ? ` · lignes illisibles : ${p.errors.join(', ')}` : ''}${p.ignored.length ? ` · lignes hors actions et ETF ignorées : ${p.ignored.join(', ')}` : ''}`)
+    + p.rows.map((r, i) => `<label class="op"><span class="l"><input type="checkbox" data-change="keepTrade" data-id="${i}"${r.keep ? ' checked' : ''}> ${r.qty > 0 ? 'Achat' : 'Vente'} ${num(Math.abs(r.qty))} · ${esc(r.name)}`
+      + `${r.newInstrument ? '<span class="tag">nouvel instrument</span>' : ''}<span class="muted" style="display:block">${r.date} · ${esc(r.isin)}${r.currency !== 'EUR' ? ` · ${r.currency}` : ''}`
+      + `${r.dup ? ` · <span class="warn">doublon : ${r.dup}</span>` : ''}</span></span><span class="r">${money(r.amount)}</span></label>`).join('')
+    + `<div class="grid2">${btn('cancelTrades', '', 'Annuler', 'ghost')}${btn('confirmTrades', '', `Importer ${p.rows.filter(r => r.keep).length}`, '')}</div>`;
+}
+
+// ---- actions ----
+const pair = id => id.split('|');
+const readText = async file => { // bank exports are often Windows-1252
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); }
+};
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+const actions = {
+  edit: id => { view.edit = id; view.tab = 'ops'; scrollTo(0, 0); },
+  cancel: () => { view.edit = null; },
+  del: id => { if (confirm('Supprimer cette opération ?')) { B.deleteOp(S, id); view.edit = null; } },
+  unlink: id => B.unlinkTransfer(S, id),
+  link: id => B.linkTransfer(S, ...pair(id)),
+  notLink: id => { for (const o of S.ops) if (pair(id).includes(o.id)) o.notTransfer = true; },
+  dismiss: id => S.dismissedAlerts.push(id),
+  unmatch: id => B.unmatch(S, id),
+  gen: () => alert(`${B.generateRecurring(S, view.month)} échéance(s) ajoutée(s).`),
+  delRec: id => { S.recurring = S.recurring.filter(r => r.id !== id); },
+  release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
+  inst: isin => { view.inst = isin; scrollTo(0, 0); },
+  closeInst: () => { view.inst = null; },
+  refreshNews: async () => { const errs = await refreshNews(S, today()); alert(errs.length ? errs.join('\n') : 'Actualités mises à jour.'); },
+  refresh: async () => { const errs = await refreshMarket(S, today()); alert(errs.length ? errs.join('\n') : 'Cours et change actualisés.'); },
+  delInst: isin => {
+    if (S.ops.some(o => o.isin === isin)) throw new Error('Cet instrument a des opérations.');
+    S.instruments = S.instruments.filter(i => i.isin !== isin);
+    delete S.quotes[isin];
+  },
+  template: () => download('modele-releve-courtier.csv', '﻿' + B.TRADES_TEMPLATE, 'text/csv'),
+  cancelTrades: () => { view.trades = null; },
+  confirmTrades: () => { const n = B.importTrades(S, view.trades.accountId, view.trades.rows, today()); view.trades = null; alert(`${n} opération(s) titres importée(s).`); },
+  cancelImport: () => { view.preview = null; },
+  confirmImport: () => { const n = B.importRows(S, view.preview.accountId, view.preview.rows, today()); view.preview = null; alert(`${n} opération(s) importée(s).`); },
+  delAcc: id => {
+    if (S.ops.some(o => o.accountId === id) || S.recurring.some(r => r.accountId === id)) throw new Error('Ce compte a des opérations ou échéances : supprimez-les d’abord.');
+    if (confirm('Supprimer ce compte ?')) S.accounts = S.accounts.filter(a => a.id !== id);
+  },
+  delCat: id => {
+    if (!confirm('Supprimer cette catégorie ? Les opérations sont conservées, sans catégorie.')) return;
+    S.categories = S.categories.filter(c => c.id !== id);
+    for (const x of [...S.ops, ...S.recurring]) if (x.categoryId === id) x.categoryId = null;
+  },
+  csv: () => download(`operations-${today()}.csv`, '﻿' + B.opsCsv(S), 'text/csv'),
+  demo: () => { if (confirm('Remplacer les données par la démonstration fictive ?')) { S = B.demoState(today()); view.tab = 'dash'; } },
+  reset: () => { if (confirm('Effacer toutes les données de ce téléphone ?')) S = B.emptyState(); },
+};
+
+const forms = {
+  op: f => {
+    B.saveOp(S, { accountId: f.accountId, date: f.date, kind: f.kind, cents: positive(f.amount), categoryId: f.categoryId, label: f.label, planned: f.planned === 'on' }, view.edit);
+    view.edit = null;
+  },
+  transfer: f => B.addTransfer(S, f.from, f.to, f.date, positive(f.amount), `Virement ${accName(f.from)} → ${accName(f.to)}`),
+  match: f => B.match(S, f.plannedId, f.realId),
+  rec: f => {
+    const day = Number(f.day);
+    if (!(Number.isInteger(day) && day >= 1 && day <= 31)) throw new Error('Jour invalide');
+    S.recurring.push({ id: B.uid(), accountId: f.accountId, kind: f.kind, cents: positive(f.amount), categoryId: f.categoryId || null, label: f.label.trim(), day });
+  },
+  env: f => B.addEnvelope(S, view.month, positive(f.amount), f.label.trim() || 'Enveloppe bourse'),
+  buy: f => B.buyFromEnvelope(S, f.envId, f.accountId, f.date, positive(f.amount), f.label.trim(), f.isin || undefined, f.isin ? decimal(f.qty) : undefined),
+  instrument: f => B.saveInstrument(S, f),
+  profile: f => {
+    const n = (v, lo, hi) => { const x = Number(String(v ?? '').replace(',', '.')); if (!(x >= lo && x <= hi)) throw new Error('Valeur de profil invalide'); return x; };
+    const targets = {};
+    for (const i of S.instruments) if (f['t_' + i.isin]) targets[i.isin] = n(f['t_' + i.isin], 0, 100);
+    if (Object.values(targets).reduce((a, b) => a + b, 0) > 100.0001) throw new Error('La somme des cibles dépasse 100 %');
+    const fee = parseEur(f.fee);
+    if (!B.RISK[f.risk] || fee < 0) throw new Error('Valeur de profil invalide');
+    S.settings.profile = { horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
+  },
+  quote: f => B.setQuote(S, f.isin, decimal(f.price), f.date),
+  market: f => { S.settings.market = { enabled: f.enabled === 'on', avKey: f.avKey.trim(), newsKey: f.newsKey.trim() }; },
+  holding: f => B.addHolding(S, f.accountId, f.isin, f.date, decimal(f.qty), parseEur(f.cost)),
+  sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
+  settings: f => {
+    const reserve = parseEur(f.reserve), globalCap = parseEur(f.globalCap), alertPct = Number(f.alertPct);
+    if (reserve < 0 || globalCap < 0 || !(Number.isInteger(alertPct) && alertPct >= 1 && alertPct <= 100)) throw new Error('Valeurs invalides');
+    Object.assign(S.settings, { reserve, globalCap, alertPct });
+  },
+  account: f => {
+    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on' };
+    if (f.id) Object.assign(S.accounts.find(x => x.id === f.id), a); else S.accounts.push({ id: B.uid(), ...a });
+  },
+  cat: f => {
+    const c = { name: f.name.trim(), cap: parseEur(f.cap) };
+    if (c.cap < 0) throw new Error('Plafond invalide');
+    if (f.id) Object.assign(S.categories.find(x => x.id === f.id), c); else S.categories.push({ id: B.uid(), ...c });
+  },
+  tradesFile: async (f, form) => {
+    const { rows, errors, ignored } = B.parseTradesCsv(await readText(form.file.files[0]));
+    view.trades = { accountId: f.accountId, rows: B.tradesPreview(S, f.accountId, rows), errors, ignored };
+  },
+  importFile: async (f, form) => {
+    const { rows, errors } = B.parseCsv(await readText(form.file.files[0]));
+    view.preview = { accountId: f.accountId, rows: B.importPreview(S, f.accountId, rows), errors };
+  },
+  backup: async f => download(`budget-sauvegarde-${today()}.json`, await B.encryptBackup(S, f.pw), 'application/json'),
+  restore: async (f, form) => {
+    const next = await B.decryptBackup(await readText(form.file.files[0]), f.pw);
+    if (confirm(`Restaurer ${next.accounts.length} compte(s) et ${next.ops.length} opération(s) ? Les données actuelles seront remplacées.`)) S = next;
+  },
+};
+
+// ---- wiring ----
+function render() {
+  app.innerHTML = !S.accounts.length && view.tab !== 'settings' ? onboarding() : views[view.tab]();
+  for (const b of document.querySelectorAll('nav button')) b.toggleAttribute('aria-current', b.dataset.tab === view.tab);
+  document.querySelector(`nav [data-tab="${view.tab}"]`).setAttribute('aria-current', 'page');
+}
+
+async function run(fn) {
+  try { await fn(); save(); } catch (err) { alert(err.message); }
+  render();
+}
+
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-tab],[data-act]');
+  if (!t) return;
+  if (t.dataset.tab) { view.tab = t.dataset.tab; view.edit = null; scrollTo(0, 0); return render(); }
+  e.preventDefault();
+  run(() => actions[t.dataset.act](t.dataset.id));
+});
+document.addEventListener('submit', e => {
+  e.preventDefault();
+  const form = e.target;
+  run(() => forms[form.dataset.form](Object.fromEntries(new FormData(form)), form));
+});
+document.addEventListener('change', e => {
+  const k = e.target.dataset.change;
+  if (!k) return;
+  if (k === 'month' && e.target.value) view.month = e.target.value;
+  if (k === 'account') view.account = e.target.value;
+  if (k === 'keep') view.preview.rows[+e.target.dataset.id].keep = e.target.checked;
+  if (k === 'keepTrade') view.trades.rows[+e.target.dataset.id].keep = e.target.checked;
+  render();
+});
+
+navigator.storage?.persist?.(); // ask the browser not to evict local data
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+render();

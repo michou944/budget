@@ -1,0 +1,9 @@
+{
+  "name": "budget",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "start": "python -m http.server 8080"
+  }
+}
