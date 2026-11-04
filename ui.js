@@ -153,7 +153,8 @@ const views = {
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}`
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
         + (x.buy ? `<div class="good">Enveloppe : ${x.buy.qty} part(s) ≈ ${eur(x.buy.total)}</div>` : '') + '</div>'
-        + `<div class="r">${ls.length ? `${eur(total(ls))}<div>${money(gain)}</div>` : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
+        + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
+          : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
 
     const sheet = isin => {
@@ -212,7 +213,7 @@ const views = {
           <select name="pos">${opts(lines.map(l => [`${l.accountId}|${l.isin}`, `${accName(l.accountId)} · ${l.inst.name} (${num(l.qty)})`]))}</select>
           <div class="grid2"><input name="qty" inputmode="decimal" placeholder="Quantité vendue" required><input name="amount" inputmode="decimal" placeholder="Montant net reçu €" required></div>
           <input type="hidden" name="date" value="${t}"><button class="ghost">Enregistrer la vente</button></form>` : '')) : '')
-      + fold('import', 'Importer un relevé courtier', tradeImportBlock(), !!view.trades)
+      + fold('import', 'Importer un relevé courtier (Fortuneo, Trade Republic, IBKR)', tradeImportBlock(), !!(view.trades || view.snap))
       + (brokers.length ? fold('brokers', 'Détail par courtier', brokers.map(a => {
         const ls = lines.filter(l => l.accountId === a.id);
         return `<h2 style="margin-top:10px">${esc(a.name)}</h2>` + row('Encaisse', B.balance(S, a))
@@ -274,15 +275,22 @@ function importBlock() {
 }
 
 function tradeImportBlock() {
-  const p = view.trades;
-  if (!p) return `<form data-form="tradesFile"><select name="accountId">${accOpts(S.accounts.find(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id))?.id)}</select>
-    <input type="file" name="file" accept=".csv,text/csv" required><button>Aperçu</button>
-    ${empty('IBKR : Flex Query « Trades » au format CSV avec les champs CurrencyPrimary, FXRateToBase, AssetClass, Symbol, Description, ISIN, TradeID, TradeDate, Quantity, NetCash, Buy/Sell (devise de base EUR).')}
-    ${empty('Trade Republic, Fortuneo : remplissez le modèle depuis vos avis d’opéré. Montant net frais inclus, négatif pour un achat ; taux = euros pour 1 unité de devise, vide en EUR.')}</form>
+  const p = view.trades, sn = view.snap;
+  if (sn) return empty(`Portefeuille ${esc(sn.data.kind)} du ${sn.data.date} · ${sn.data.lines.length} ligne(s) → compte ${esc(accName(sn.accountId))}`
+      + `${sn.data.errors.length ? ` · lignes illisibles : ${sn.data.errors.join(', ')}` : ''}`)
+    + sn.data.lines.map(l => `<div class="op"><div class="l">${esc(l.name)}<div class="muted">${num(l.qty)} × ${num(l.price)} ${l.currency} · ${esc(l.isin)}</div></div>`
+      + `<div class="r">${eur(l.value)}<div>${money(l.value - l.cost)}</div></div></div>`).join('')
+    + empty(`Ces positions ${S.snapshots[sn.accountId] ? 'remplacent celles du précédent export' : 'deviennent celles de ce compte'} ; les achats saisis après le ${sn.data.date} s’y ajoutent.`)
+    + `<div class="grid2">${btn('cancelSnap', '', 'Annuler', 'ghost')}${btn('confirmSnap', '', 'Importer', '')}</div>`;
+  if (!p) return `<form data-form="tradesFile"><select name="accountId" aria-label="Compte">${accOpts(S.accounts.find(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id))?.id)}</select>
+    <input type="file" name="file" accept=".csv,.xls,.xlsx,text/csv" required><button>Aperçu</button>
+    ${empty('Fortuneo : « Export portefeuille simple » (.xls), un fichier par compte (PEA, compte-titres). Trade Republic : « Exportation de transactions » (.csv). IBKR : Flex Query « Trades » en CSV.')}
+    ${empty('Autre courtier : remplissez le modèle (montant net frais inclus, négatif pour un achat).')}</form>
     <div style="margin-top:8px">${btn('template', '', 'Télécharger le modèle', 'ghost')}</div>`;
   return empty(`${esc(accName(p.accountId))} · ${p.rows.length} opération(s)${p.errors.length ? ` · lignes illisibles : ${p.errors.join(', ')}` : ''}${p.ignored.length ? ` · lignes hors actions et ETF ignorées : ${p.ignored.join(', ')}` : ''}`)
-    + p.rows.map((r, i) => `<label class="op"><span class="l"><input type="checkbox" data-change="keepTrade" data-id="${i}"${r.keep ? ' checked' : ''}> ${r.qty > 0 ? 'Achat' : 'Vente'} ${num(Math.abs(r.qty))} · ${esc(r.name)}`
-      + `${r.newInstrument ? '<span class="tag">nouvel instrument</span>' : ''}<span class="muted" style="display:block">${r.date} · ${esc(r.isin)}${r.currency !== 'EUR' ? ` · ${r.currency}` : ''}`
+    + p.rows.map((r, i) => `<label class="op"><span class="l"><input type="checkbox" data-change="keepTrade" data-id="${i}"${r.keep ? ' checked' : ''}> `
+      + (r.isin ? `${r.qty > 0 ? 'Achat' : 'Vente'} ${num(Math.abs(r.qty))} · ${esc(r.name)}` : esc(r.label))
+      + `${r.newInstrument ? '<span class="tag">nouveau titre</span>' : ''}<span class="muted" style="display:block">${r.date}${r.isin ? ` · ${esc(r.isin)}` : ''}${r.currency && r.currency !== 'EUR' ? ` · ${r.currency}` : ''}`
       + `${r.dup ? ` · <span class="warn">doublon : ${r.dup}</span>` : ''}</span></span><span class="r">${money(r.amount)}</span></label>`).join('')
     + `<div class="grid2">${btn('cancelTrades', '', 'Annuler', 'ghost')}${btn('confirmTrades', '', `Importer ${p.rows.filter(r => r.keep).length}`, '')}</div>`;
 }
@@ -293,6 +301,13 @@ const readText = async file => { // bank exports are often Windows-1252
   const buf = await file.arrayBuffer();
   try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { return new TextDecoder('windows-1252').decode(buf); }
 };
+// SheetJS (vendor/, Apache-2.0) is only loaded when an Excel file is imported
+const loadXlsx = () => window.XLSX ? Promise.resolve(window.XLSX) : new Promise((ok, ko) => {
+  const sc = Object.assign(document.createElement('script'), { src: 'vendor/xlsx.full.min.js' });
+  sc.onload = () => ok(window.XLSX);
+  sc.onerror = () => ko(new Error('Lecteur Excel indisponible : réessayez connecté à Internet.'));
+  document.head.append(sc);
+});
 function download(name, text, type) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([text], { type }));
@@ -333,6 +348,8 @@ const actions = {
   },
   template: () => download('modele-releve-courtier.csv', '﻿' + B.TRADES_TEMPLATE, 'text/csv'),
   cancelTrades: () => { view.trades = null; },
+  cancelSnap: () => { view.snap = null; },
+  confirmSnap: () => { const n = B.applySnapshot(S, view.snap.accountId, view.snap.data, 'Fortuneo'); view.snap = null; alert(`${n} position(s) importée(s).`); },
   confirmTrades: () => { const n = B.importTrades(S, view.trades.accountId, view.trades.rows, today()); view.trades = null; alert(`${n} opération(s) titres importée(s).`); },
   cancelImport: () => { view.preview = null; },
   confirmImport: () => { const n = B.importRows(S, view.preview.accountId, view.preview.rows, today()); view.preview = null; alert(`${n} opération(s) importée(s).`); },
@@ -395,7 +412,13 @@ const forms = {
     if (f.id) Object.assign(S.categories.find(x => x.id === f.id), c); else S.categories.push({ id: B.uid(), ...c });
   },
   tradesFile: async (f, form) => {
-    const { rows, errors, ignored } = B.parseTradesCsv(await readText(form.file.files[0]));
+    const file = form.file.files[0];
+    if (/\.xlsx?$/i.test(file.name)) {
+      const X = await loadXlsx(), wb = X.read(await file.arrayBuffer());
+      view.snap = { accountId: f.accountId, data: B.parseFortuneoRows(X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' })) };
+      return;
+    }
+    const { rows, errors, ignored } = B.parseTradesCsv(await readText(file));
     view.trades = { accountId: f.accountId, rows: B.tradesPreview(S, f.accountId, rows), errors, ignored };
   },
   importFile: async (f, form) => {

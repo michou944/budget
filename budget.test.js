@@ -333,6 +333,66 @@ test('Broker import: template (TR / Fortuneo) in French format; manual entry of 
   assert.equal(B.positions(s).find(p => p.isin === 'FR0000120271').cost, 29150);
 });
 
+// Same columns as Trade Republic's « Exportation de transactions »; fictional values.
+const TR_HEAD = '"datetime","date","account_type","category","type","asset_class","name","symbol","shares","price","amount","fee","tax","currency","original_amount","original_currency","fx_rate","description","transaction_id","counterparty_name","counterparty_iban","payment_reference","mcc_code"';
+const tr = (date, cat, type, name, isin, shares, amount, fee, tax, ccy, id, desc = '') =>
+  `"${date}T10:00:00Z","${date}","DEFAULT","${cat}","${type}","","${name}","${isin}","${shares}","","${amount}","${fee}","${tax}","${ccy}","","","","${desc}","${id}","","","",""`;
+const TR_CSV = [TR_HEAD,
+  tr('2026-10-01', 'CASH', 'TRANSFER_INSTANT_INBOUND', '', '', '', '500.000000', '', '', 'EUR', 't1', 'Incoming transfer'),
+  tr('2026-10-02', 'TRADING', 'BUY', 'NVIDIA', 'US67066G1040', '2.0000000000', '-200.00', '-1.00', '', 'EUR', 't2'),
+  tr('2026-10-03', 'DELIVERY', 'FREE_RECEIPT', 'NVIDIA', 'US67066G1040', '-2.0000000000', '', '', '', '', 't3'),
+  tr('2026-10-03', 'DELIVERY', 'FREE_RECEIPT', 'NVIDIA', 'US67066G1040', '2.0000000000', '', '', '', '', 't4'),
+  tr('2026-10-05', 'TRADING', 'SELL', 'NVIDIA', 'US67066G1040', '1.0000000000', '120.00', '-1.00', '-2.00', 'EUR', 't5'),
+  tr('2026-10-06', 'CASH', 'DIVIDEND', 'NVIDIA', 'US67066G1040', '1.0000000000', '1.10', '', '-0.52', 'EUR', 't6'),
+  tr('2026-11-02', 'CASH', 'CARD_TRANSACTION', 'LIBRAIRIE', '', '', '-24.99', '', '', 'EUR', 't7'),
+  tr('2026-11-02', 'CASH', 'CARD_ORDERING_FEE', '', '', '', '0.000000', '-50.00', '', 'EUR', 't8', 'Card'),
+  tr('2026-11-03', 'CASH', 'INTEREST_PAYMENT', '', '', '', '0.000000', '', '', 'EUR', 't9'),
+  tr('2026-11-03', 'CASH', 'DIVIDEND', 'X', 'US0000000001', '1', '1.00', '', '', 'USD', 't10'),
+].join('\n');
+
+test('Trade Republic export: trades rebuild the position, cash moves stay at the broker, card payments are household spending', () => {
+  const s = base();
+  const { rows, errors, ignored } = B.parseTradesCsv(TR_CSV);
+  assert.deepEqual(errors, [11]); // a non-EUR line is refused rather than misread
+  assert.deepEqual(ignored, [4, 5, 10]); // the −2/+2 transfer pair cancels out; a zero line is skipped
+  assert.equal(B.importTrades(s, 'b', B.tradesPreview(s, 'b', rows), T), 6);
+  assert.deepEqual(B.positions(s), [{ accountId: 'b', isin: 'US67066G1040', qty: 1, cost: 10050 }]);
+  assert.equal(B.balance(s, s.accounts[1]), 50000 - 20100 + 11700 + 58 - 2499 - 5000);
+  assert.equal(B.monthStats(s, '2026-10').income, 0); // deposit and dividend are not household income
+  assert.equal(B.monthStats(s, '2026-11').spent, 2499 + 5000);
+  assert.ok(B.tradesPreview(s, 'b', rows).every(r => r.dup === 'déjà importée'));
+});
+
+// Same layout as Fortuneo's « Export portefeuille simple » once read from the .xls; fictional values.
+const FORTUNEO = [
+  ['Portefeuille 000000000000'], ['(PEA M TEST)'], ['03/11/2026'], [''],
+  ['Libellé', 'Cours', '', 'Dev', 'Var/Veille', 'Qté', 'PRU', 'Valorisation', '+/- values', '+/- values (%)', 'Poids', 'ISIN'],
+  ['TOTALENERGIES (TTE)', 60, 'V', 'EUR', 0, 10, 50, 600, 100, 0.2, 0.5, 'FR0000120271'],
+  ['Coca-Cola (KO)', 100, '', 'USD', 0.01, 5, 80, 450, 90, 0.25, 0.4, 'US1912161007'],
+  ['Square Enix (EI4)', 20, '', 'EUR', 0, 3, 25, 60, -15, -0.2, 0.1, 'JP3164630000'],
+  ['Ligne illisible', 'n/a', '', 'EUR', 0, 1, 1, 1, 0, 0, 0, 'BAD'],
+];
+
+test('Fortuneo snapshot: positions, cost, dated price and implied exchange rate; a re-import replaces it; later trades add', () => {
+  const s = base();
+  const snap = B.parseFortuneoRows(FORTUNEO);
+  assert.equal(snap.date, T); assert.equal(snap.kind, 'PEA'); assert.deepEqual(snap.errors, [9]);
+  assert.deepEqual(snap.lines[1], { isin: 'US1912161007', name: 'Coca-Cola', ticker: 'KO', currency: 'USD', qty: 5, price: 100, value: 45000, cost: 36000 });
+  B.applySnapshot(s, 'b', snap, 'Fortuneo');
+  assert.deepEqual(s.instruments.map(i => i.symbol), ['TTE.PAR', 'KO', '']); // ticker turned into a price symbol when it can be guessed
+  assert.deepEqual(s.quotes['FR0000120271'], { price: 60, currency: 'EUR', asOf: T, source: 'Fortuneo', fetchedAt: T });
+  assert.equal(Math.round(s.fx.USD.rate * 1e4) / 1e4, 1.1111);
+  const v = Object.fromEntries(B.valuation(s, T).map(l => [l.isin, l]));
+  assert.equal(v['US1912161007'].value, 45000); assert.equal(v['US1912161007'].gain, 9000); assert.equal(v['FR0000120271'].cost, 50000);
+  B.addEnvelope(s, M, 10000);
+  B.buyFromEnvelope(s, s.envelopes[0].id, 'b', '2026-11-03', 6100, 'achat déjà dans l’export', 'FR0000120271', 1);
+  B.buyFromEnvelope(s, s.envelopes[0].id, 'b', '2026-11-04', 3000, 'achat après l’export', 'JP3164630000', 1);
+  const pos = Object.fromEntries(B.positions(s).map(p => [p.isin, p.qty]));
+  assert.equal(pos['FR0000120271'], 10); assert.equal(pos['JP3164630000'], 4);
+  B.applySnapshot(s, 'b', { ...snap, date: '2026-11-04', lines: snap.lines.slice(0, 1) }, 'Fortuneo');
+  assert.deepEqual(B.positions(s).map(p => [p.isin, p.qty]), [['FR0000120271', 10]]);
+});
+
 test('demo data reproduces the spec figures', () => {
   const demo = B.validateState(B.demoState('2026-11-03')), st = B.monthStats(demo, M);
   assert.equal(B.valuation(demo, '2026-11-03').filter(l => l.stale).length, 1);

@@ -15,7 +15,7 @@ export function emptyState() {
     categories: ['Logement', 'Alimentation', 'Santé', 'Mobilité et auto', 'Impôts', 'Loisirs', 'Abonnements', 'Divers']
       .map(name => ({ id: uid(), name, cap: 0 })),
     settings: { reserve: 0, globalCap: 0, alertPct: 80, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
-    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {},
+    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {},
   };
 }
 
@@ -28,7 +28,7 @@ export function validateState(x) {
     x.settings.market = { enabled: false, avKey: '' };
   }
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
-    x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {};
+    x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {};
   }
   const ok = x && x.version === 2 && x.settings?.market && x.quotes && x.fx
     && ['accounts', 'ops', 'recurring', 'envelopes', 'categories', 'dismissedAlerts', 'instruments', 'requestLog'].every(k => Array.isArray(x[k]))
@@ -88,7 +88,7 @@ export const upcoming = (s, m) => {
 
 export function staleAccounts(s, today, maxDays = 30) {
   return s.accounts
-    .map(a => ({ a, last: s.ops.filter(o => o.accountId === a.id && !o.planned).map(o => o.date).sort().at(-1) ?? null }))
+    .map(a => ({ a, last: [...s.ops.filter(o => o.accountId === a.id && !o.planned).map(o => o.date), s.snapshots?.[a.id]?.date ?? ''].sort().at(-1) || null }))
     .filter(x => !x.last || dayNum(today) - dayNum(x.last) > maxDays);
 }
 
@@ -257,9 +257,12 @@ export function addSale(s, accountId, isin, date, qty, cents) {
 }
 
 // Average-cost positions per account and instrument; cost in cents, fees included.
+// An account with a broker snapshot starts from it: only its trades dated after the snapshot are added.
 export function positions(s) {
-  const map = new Map();
-  for (const o of s.ops.filter(o => o.kind === 'invest' && o.isin && o.qty).sort((a, b) => a.date.localeCompare(b.date))) {
+  const snaps = s.snapshots ?? {}, map = new Map();
+  for (const [accountId, sn] of Object.entries(snaps)) for (const l of sn.lines) map.set(`${accountId}|${l.isin}`, { accountId, isin: l.isin, qty: l.qty, cost: l.cost });
+  const counted = o => o.kind === 'invest' && o.isin && o.qty && !(snaps[o.accountId] && o.date <= snaps[o.accountId].date);
+  for (const o of s.ops.filter(counted).sort((a, b) => a.date.localeCompare(b.date))) {
     const k = `${o.accountId}|${o.isin}`, p = map.get(k) ?? { accountId: o.accountId, isin: o.isin, qty: 0, cost: 0 };
     if (o.qty > 0) p.cost += o.cost ?? -o.amount;
     else p.cost -= p.qty > 0 ? Math.round((p.cost * -o.qty) / p.qty) : 0;
@@ -479,6 +482,7 @@ export const TRADES_TEMPLATE = 'date;isin;nom;sens;quantite;montant net;devise;t
 // shortcut: column names follow IBKR's Flex field names and our template; to re-check on real anonymised exports.
 export function parseTradesCsv(text) {
   const { rows: lines, col } = csvTable(text);
+  if (col(/^transaction_id$/) >= 0 && col(/^category$/) >= 0) return parseTradeRepublic(lines, col);
   const c = {
     date: col(/^tradedate$/, /^date/), isin: col(/^isin$/), qty: col(/^quantity$/, /^quantite/), net: col(/^netcash$/, /^montant/),
     side: col(/^buy\/sell$/, /^sens$/), ccy: col(/^currencyprimary$/, /^currency$/, /^devise$/), fx: col(/^fxratetobase$/, /^taux/),
@@ -501,6 +505,76 @@ export function parseTradesCsv(text) {
   return { rows, errors, ignored };
 }
 
+// Trade Republic « Exportation de transactions »: trades rebuild positions; dividends, interest and deposits move
+// the broker's cash (outside the household budget); card payments are household expenses.
+function parseTradeRepublic(lines, col) {
+  const c = { date: col(/^date$/), cat: col(/^category$/), type: col(/^type$/), name: col(/^name$/), isin: col(/^symbol$/), shares: col(/^shares$/),
+    amount: col(/^amount$/), fee: col(/^fee$/), tax: col(/^tax$/), ccy: col(/^currency$/), id: col(/^transaction_id$/), desc: col(/^description$/) };
+  const num = v => Number(String(v ?? '').trim() || 0), rows = [], errors = [], ignored = [];
+  // securities moved between TR sub-accounts come as −n / +n pairs on the same day: they cancel out
+  const moves = {};
+  for (const r of lines) if (r[c.cat] === 'DELIVERY') moves[r[c.isin] + r[c.date]] = (moves[r[c.isin] + r[c.date]] ?? 0) + num(r[c.shares]);
+  lines.forEach((r, n) => {
+    const line = n + 2, type = r[c.type] ?? '', date = parseDate(r[c.date]), isin = String(r[c.isin] ?? '').toUpperCase(), name = r[c.name] ?? '';
+    const net = Math.round((num(r[c.amount]) + num(r[c.fee]) + num(r[c.tax])) * 100);
+    if (!date || (r[c.ccy] && r[c.ccy] !== 'EUR')) return errors.push(line);
+    if (r[c.cat] === 'DELIVERY') return Math.abs(moves[r[c.isin] + r[c.date]]) < 1e-9 ? ignored.push(line) : errors.push(line);
+    if (r[c.cat] === 'TRADING') {
+      const qty = Math.abs(num(r[c.shares])) * (type === 'SELL' ? -1 : 1);
+      if (!/^[A-Z]{2}[A-Z0-9]{9}\d$/.test(isin) || !qty || !net || Math.sign(qty) === Math.sign(net)) return errors.push(line);
+      return rows.push({ date, isin, qty, amount: net, currency: 'EUR', name: name || isin, symbol: '', tradeId: r[c.id] });
+    }
+    if (!net) return ignored.push(line);
+    const card = /^CARD_/.test(type);
+    const label = card ? `Carte TR · ${name || r[c.desc]}` : type === 'DIVIDEND' ? `Dividende ${name}` : /INTEREST/.test(type) ? 'Intérêts'
+      : /TAX/.test(type) ? 'Impôt / régularisation' : /INBOUND|INPAYMENT/.test(type) ? 'Versement' : String(r[c.desc] || type);
+    rows.push({ date, amount: net, kind: card ? (net < 0 ? 'expense' : 'refund') : 'invest', label, tradeId: r[c.id] });
+  });
+  return { rows, errors, ignored };
+}
+
+// Fortuneo « Export portefeuille simple » (.xls, turned into rows of cells by the page): a dated snapshot of the positions.
+export function parseFortuneoRows(rows) {
+  const h = rows.findIndex(r => /^libell/i.test(String(r[0])) && r.some(x => /isin/i.test(String(x))));
+  if (h < 0) throw new Error('Fichier Fortuneo non reconnu (colonnes Libellé … ISIN attendues)');
+  const head = rows[h].map(x => String(x).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''));
+  const col = re => head.findIndex(x => re.test(x));
+  const c = { price: col(/^cours/), ccy: col(/^dev/), qty: col(/^qt/), value: col(/^valorisation/), pv: col(/^\+\/- values$/), isin: col(/^isin/) };
+  if (Object.values(c).some(i => i < 0)) throw new Error('Colonnes Fortuneo manquantes (Cours, Dev, Qté, Valorisation, +/- values, ISIN)');
+  const num = v => (typeof v === 'number' ? v : Number(String(v ?? '').replace(/[\s ]/g, '').replace(',', '.')));
+  const cellDate = v => (typeof v === 'number' ? new Date(Date.UTC(1899, 11, 30) + v * 864e5).toISOString().slice(0, 10) : parseDate(String(v).trim()));
+  const date = rows.slice(0, h).map(r => cellDate(r[0])).find(Boolean);
+  if (!date) throw new Error('Date du portefeuille introuvable');
+  const lines = [], errors = [];
+  rows.slice(h + 1).forEach((r, n) => {
+    if (!String(r[0] ?? '').trim()) return;
+    const isin = String(r[c.isin] ?? '').trim().toUpperCase(), qty = num(r[c.qty]), price = num(r[c.price]), value = num(r[c.value]), pv = num(r[c.pv]);
+    if (!/^[A-Z]{2}[A-Z0-9]{9}\d$/.test(isin) || !(qty > 0) || !(price > 0) || !(value > 0) || !Number.isFinite(pv)) return errors.push(h + n + 2);
+    const label = String(r[0]).trim(), ticker = label.match(/\(([A-Z0-9.]+)\)$/)?.[1] ?? '';
+    lines.push({ isin, name: label.replace(/\s*\([A-Z0-9.]+\)$/, ''), ticker, currency: String(r[c.ccy]).trim().toUpperCase() || 'EUR',
+      qty, price, value: Math.round(value * 100), cost: Math.round((value - pv) * 100) }); // valuation and gain are in euros
+  });
+  return { date, kind: rows.slice(0, h).map(r => String(r[0]).match(/^\((\w+)/)?.[1]).find(Boolean) ?? '', lines, errors };
+}
+
+// shortcut: price symbol guessed from the ticker the broker shows (US → as is, Paris in EUR → .PAR); others via « Trouver le cours »
+const guessSymbol = l => (!l.ticker ? '' : l.isin.startsWith('US') ? l.ticker : l.isin.startsWith('FR') && l.currency === 'EUR' ? `${l.ticker}.PAR` : '');
+
+// The snapshot becomes the account's positions; trades recorded after its date still add to it. Re-importing replaces it.
+export function applySnapshot(s, accountId, snap, source) {
+  for (const l of snap.lines) {
+    if (!s.instruments.some(i => i.isin === l.isin)) saveInstrument(s, { isin: l.isin, name: l.name, symbol: guessSymbol(l), currency: l.currency });
+    const inst = s.instruments.find(i => i.isin === l.isin);
+    if (inst.currency === l.currency && !(s.quotes[l.isin]?.asOf > snap.date)) setQuote(s, l.isin, l.price, snap.date, source);
+    // the broker's own euro valuation tells the exchange rate it used
+    if (l.currency !== 'EUR' && !(s.fx[l.currency]?.asOf >= snap.date))
+      s.fx[l.currency] = { rate: (l.qty * l.price * 100) / l.value, asOf: snap.date, source: `${source} (taux implicite)`, fetchedAt: snap.date };
+  }
+  s.snapshots[accountId] = { date: snap.date, source, lines: snap.lines.map(({ isin, qty, cost }) => ({ isin, qty, cost })) };
+  s.lastImport = { date: snap.date, accountId, count: snap.lines.length };
+  return snap.lines.length;
+}
+
 export function tradesPreview(s, accountId, rows) {
   const keys = new Set(s.ops.map(o => o.importKey).filter(Boolean)), seen = {};
   return rows.map(r => {
@@ -509,13 +583,17 @@ export function tradesPreview(s, accountId, rows) {
     const dup = keys.has(importKey) ? 'déjà importée'
       : s.ops.some(o => !o.importKey && o.kind === 'invest' && o.accountId === accountId && o.isin === r.isin && o.date === r.date && Math.abs(o.qty - r.qty) < 1e-9)
         ? 'saisie manuelle identique' : null;
-    return { ...r, importKey, dup, keep: !dup, newInstrument: !s.instruments.some(i => i.isin === r.isin) };
+    return { ...r, importKey, dup, keep: !dup, newInstrument: !!r.isin && !s.instruments.some(i => i.isin === r.isin) };
   });
 }
 
 export function importTrades(s, accountId, preview, today) {
   const kept = preview.filter(r => r.keep);
   for (const r of kept) {
+    if (!r.isin) { // broker cash movement (dividend, interest, deposit) or card payment
+      s.ops.push({ id: uid(), accountId, date: r.date, amount: r.amount, kind: r.kind, categoryId: null, label: r.label, importKey: r.importKey });
+      continue;
+    }
     if (!s.instruments.some(i => i.isin === r.isin)) saveInstrument(s, { isin: r.isin, name: r.name, currency: r.currency });
     s.ops.push({ id: uid(), accountId, date: r.date, amount: r.amount, kind: 'invest', isin: r.isin, qty: r.qty,
       label: `${r.qty > 0 ? 'Achat' : 'Vente'} ${r.name}`, importKey: r.importKey });
