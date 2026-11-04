@@ -1,4 +1,4 @@
-﻿// Offline cache for the app's own files. Market data requests (other origins) are never cached:
+// Offline cache for the app's own files. Market data requests (other origins) are never cached:
 // an old quote must show with its own date, not be served silently as if it were fresh.
 const CACHE = 'budget-v8';
 const FILES = ['./', 'index.html', 'ui.js', 'budget.js', 'market.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png'];
