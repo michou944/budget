@@ -190,7 +190,7 @@ export function buyFromEnvelope(s, envId, accountId, date, cents, label, isin, q
   if (!Number.isInteger(cents) || cents <= 0) throw new Error('Montant invalide');
   if (cents > envelopeLeft(s, e)) throw new Error('Montant supérieur au reliquat de l’enveloppe');
   if (isin) checkTrade(s, isin, qty);
-  s.ops.push({ id: uid(), accountId, date, amount: -cents, kind: 'invest', envelopeId: envId, label, ...(isin && { isin, qty }) });
+  s.ops.push({ id: uid(), accountId, date, amount: -cents, kind: 'invest', envelopeId: envId, label, seq: stamp(s), ...(isin && { isin, qty }) });
 }
 
 export const releaseEnvelope = (s, id) => { s.envelopes.find(e => e.id === id).released = true; };
@@ -244,7 +244,7 @@ const checkTrade = (s, isin, qty) => {
 export function addHolding(s, accountId, isin, date, qty, costCents) {
   checkTrade(s, isin, qty);
   if (!Number.isInteger(costCents) || costCents < 0) throw new Error('Prix de revient invalide');
-  s.ops.push({ id: uid(), accountId, date, amount: 0, cost: costCents, kind: 'invest', isin, qty, label: 'Position existante' });
+  s.ops.push({ id: uid(), accountId, date, amount: 0, cost: costCents, kind: 'invest', isin, qty, label: 'Position existante', seq: stamp(s) });
 }
 
 // Records a sale already done at the broker; proceeds land in the broker account, not in the household budget.
@@ -253,15 +253,31 @@ export function addSale(s, accountId, isin, date, qty, cents) {
   const held = positions(s).find(p => p.accountId === accountId && p.isin === isin)?.qty ?? 0;
   if (qty > held + 1e-9) throw new Error('Quantité supérieure à la position');
   if (!Number.isInteger(cents) || cents <= 0) throw new Error('Montant invalide');
-  s.ops.push({ id: uid(), accountId, date, amount: cents, kind: 'invest', isin, qty: -qty, label: 'Vente' });
+  s.ops.push({ id: uid(), accountId, date, amount: cents, kind: 'invest', isin, qty: -qty, label: `Vente ${s.instruments.find(i => i.isin === isin).name}`, seq: stamp(s) });
 }
+
+// Removes a title entered by mistake, with everything attached to it (trades, snapshot lines, prices, news, target).
+export function deleteInstrument(s, isin) {
+  s.ops = s.ops.filter(o => o.isin !== isin);
+  for (const sn of Object.values(s.snapshots)) sn.lines = sn.lines.filter(l => l.isin !== isin);
+  s.instruments = s.instruments.filter(i => i.isin !== isin);
+  for (const k of ['quotes', 'history', 'peaks', 'newsFetched']) delete s[k][isin];
+  delete s.settings.profile.targets[isin];
+  s.news = s.news.filter(n => n.isin !== isin);
+}
+
+// Increasing number telling whether a trade was recorded before or after the last broker snapshot import.
+const stamp = s => (s.seq = (s.seq ?? 0) + 1);
 
 // Average-cost positions per account and instrument; cost in cents, fees included.
 // An account with a broker snapshot starts from it: only its trades dated after the snapshot are added.
 export function positions(s) {
   const snaps = s.snapshots ?? {}, map = new Map();
   for (const [accountId, sn] of Object.entries(snaps)) for (const l of sn.lines) map.set(`${accountId}|${l.isin}`, { accountId, isin: l.isin, qty: l.qty, cost: l.cost });
-  const counted = o => o.kind === 'invest' && o.isin && o.qty && !(snaps[o.accountId] && o.date <= snaps[o.accountId].date);
+  const counted = o => {
+    const sn = snaps[o.accountId];
+    return o.kind === 'invest' && o.isin && o.qty && (!sn || o.date > sn.date || (o.seq ?? 0) > (sn.seq ?? 0)); // recorded after the import: not in it
+  };
   for (const o of s.ops.filter(counted).sort((a, b) => a.date.localeCompare(b.date))) {
     const k = `${o.accountId}|${o.isin}`, p = map.get(k) ?? { accountId: o.accountId, isin: o.isin, qty: 0, cost: 0 };
     if (o.qty > 0) p.cost += o.cost ?? -o.amount;
@@ -570,7 +586,7 @@ export function applySnapshot(s, accountId, snap, source) {
     if (l.currency !== 'EUR' && !(s.fx[l.currency]?.asOf >= snap.date))
       s.fx[l.currency] = { rate: (l.qty * l.price * 100) / l.value, asOf: snap.date, source: `${source} (taux implicite)`, fetchedAt: snap.date };
   }
-  s.snapshots[accountId] = { date: snap.date, source, lines: snap.lines.map(({ isin, qty, cost }) => ({ isin, qty, cost })) };
+  s.snapshots[accountId] = { date: snap.date, source, seq: stamp(s), lines: snap.lines.map(({ isin, qty, cost }) => ({ isin, qty, cost })) };
   s.lastImport = { date: snap.date, accountId, count: snap.lines.length };
   return snap.lines.length;
 }
@@ -596,7 +612,7 @@ export function importTrades(s, accountId, preview, today) {
     }
     if (!s.instruments.some(i => i.isin === r.isin)) saveInstrument(s, { isin: r.isin, name: r.name, currency: r.currency });
     s.ops.push({ id: uid(), accountId, date: r.date, amount: r.amount, kind: 'invest', isin: r.isin, qty: r.qty,
-      label: `${r.qty > 0 ? 'Achat' : 'Vente'} ${r.name}`, importKey: r.importKey });
+      label: `${r.qty > 0 ? 'Achat' : 'Vente'} ${r.name}`, importKey: r.importKey, seq: stamp(s) });
   }
   s.lastImport = { date: today, accountId, count: kept.length };
   return kept.length;

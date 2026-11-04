@@ -395,12 +395,24 @@ test('Fortuneo snapshot: positions, cost, dated price and implied exchange rate;
   const v = Object.fromEntries(B.valuation(s, T).map(l => [l.isin, l]));
   assert.equal(v['US1912161007'].value, 45000); assert.equal(v['US1912161007'].gain, 9000); assert.equal(v['FR0000120271'].cost, 50000);
   B.addEnvelope(s, M, 10000);
-  B.buyFromEnvelope(s, s.envelopes[0].id, 'b', '2026-11-03', 6100, 'achat déjà dans l’export', 'FR0000120271', 1);
+  B.buyFromEnvelope(s, s.envelopes[0].id, 'b', '2026-11-03', 6100, 'achat saisi après l’import, même jour', 'FR0000120271', 1);
   B.buyFromEnvelope(s, s.envelopes[0].id, 'b', '2026-11-04', 3000, 'achat après l’export', 'JP3164630000', 1);
+  B.addSale(s, 'b', 'US1912161007', '2026-11-03', 5, 46000); // everything sold the day of the export, recorded after the import
   const pos = Object.fromEntries(B.positions(s).map(p => [p.isin, p.qty]));
-  assert.equal(pos['FR0000120271'], 10); assert.equal(pos['JP3164630000'], 4);
-  B.applySnapshot(s, 'b', { ...snap, date: '2026-11-04', lines: snap.lines.slice(0, 1) }, 'Fortuneo');
+  assert.deepEqual(pos, { FR0000120271: 11, JP3164630000: 4 });
+  B.applySnapshot(s, 'b', { ...snap, date: '2026-11-04', lines: snap.lines.slice(0, 1) }, 'Fortuneo'); // newer export already includes them
   assert.deepEqual(B.positions(s).map(p => [p.isin, p.qty]), [['FR0000120271', 10]]);
+});
+
+test('Deleting a title removes its trades, snapshot line, price, news and target', () => {
+  const s = withInstruments();
+  B.applySnapshot(s, 'b', B.parseFortuneoRows(FORTUNEO), 'Fortuneo');
+  B.addHolding(s, 'b', ETF, '2025-01-01', 1, 10000);
+  B.addNews(s, ETF, { title: 'x', url: 'https://ex.com/x', source: 'ex.com', publishedAt: T }, T);
+  s.settings.profile.targets[ETF] = 50;
+  B.deleteInstrument(s, ETF); B.deleteInstrument(s, 'FR0000120271');
+  assert.deepEqual(B.positions(s).map(p => p.isin), ['US1912161007', 'JP3164630000']);
+  assert.ok(!s.instruments.some(i => i.isin === ETF) && !s.quotes['FR0000120271'] && !s.news.length && !(ETF in s.settings.profile.targets));
 });
 
 test('demo data reproduces the spec figures', () => {

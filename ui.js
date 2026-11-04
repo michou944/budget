@@ -160,7 +160,7 @@ const views = {
     const sheet = isin => {
       const i = inst(isin), x = sug.find(y => y.isin === isin);
       if (!i || !x) return '';
-      const q = S.quotes[isin], news = B.newsFor(S, isin), noOps = !S.ops.some(o => o.isin === isin);
+      const q = S.quotes[isin], news = B.newsFor(S, isin), noOps = !S.ops.some(o => o.isin === isin) && !lines.some(l => l.isin === isin);
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
         `<div style="margin-bottom:8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
         + x.reasons.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}</span></div>`).join('')
@@ -170,7 +170,12 @@ const views = {
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
           + `<div class="muted">${esc(n.source)} · ${n.publishedAt}</div></div></div>`).join('') || empty('Aucune actualité.'))
-        + `<div class="grid2" style="margin-top:8px">${btn('findSymbol', isin, i.symbol ? 'Changer de cotation' : 'Trouver le cours', 'ghost')}${noOps ? btn('delInst', isin, 'Ne plus suivre', 'danger') : ''}</div>`
+        + lines.filter(l => l.isin === isin).map(l => `<details style="margin-top:8px"><summary><b>J’ai vendu</b> <span class="muted">sur ${esc(accName(l.accountId))}</span></summary>
+          <form data-form="sale"><input type="hidden" name="pos" value="${esc(`${l.accountId}|${isin}`)}">
+          <div class="grid2"><label>Quantité vendue<input name="qty" inputmode="decimal" value="${num(l.qty)}"></label><label>Montant net reçu (€)<input name="amount" inputmode="decimal" required></label></div>
+          <input type="date" name="date" value="${t}" required><button>Enregistrer la vente</button>
+          ${empty('Quantité pré-remplie avec tout ce que vous détenez : changez-la si vous avez vendu une partie.')}</form></details>`).join('')
+        + `<div class="grid2" style="margin-top:8px">${btn('findSymbol', isin, i.symbol ? 'Changer de cotation' : 'Trouver le cours', 'ghost')}${btn('delInst', isin, noOps ? 'Ne plus suivre' : 'Supprimer ce titre', 'danger')}</div>`
         + `<details style="margin-top:8px"><summary class="muted">Détails techniques</summary><form data-form="instrument"><input type="hidden" name="isin" value="${esc(isin)}">
           <div class="grid2"><input name="name" value="${esc(i.name)}" aria-label="Nom"><input name="symbol" value="${esc(i.symbol)}" placeholder="Symbole de cours" aria-label="Symbole"></div>
           <div class="grid2"><input name="currency" value="${esc(i.currency)}" maxlength="3" aria-label="Devise"><input name="place" value="${esc(i.place)}" placeholder="Place" aria-label="Place"></div>
@@ -342,9 +347,11 @@ const actions = {
     view.search = null;
   },
   delInst: isin => {
-    if (S.ops.some(o => o.isin === isin)) throw new Error('Cet instrument a des opérations.');
-    S.instruments = S.instruments.filter(i => i.isin !== isin);
-    delete S.quotes[isin];
+    const name = S.instruments.find(i => i.isin === isin)?.name;
+    const held = S.ops.some(o => o.isin === isin) || Object.values(S.snapshots).some(sn => sn.lines.some(l => l.isin === isin));
+    if (!confirm(held ? `Supprimer ${name} avec ses achats, ventes et position importée ? Pour une vente réelle, utilisez plutôt « J’ai vendu ».` : `Ne plus suivre ${name} ?`)) return;
+    B.deleteInstrument(S, isin);
+    view.inst = null;
   },
   template: () => download('modele-releve-courtier.csv', '﻿' + B.TRADES_TEMPLATE, 'text/csv'),
   cancelTrades: () => { view.trades = null; },
