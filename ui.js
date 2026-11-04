@@ -188,7 +188,9 @@ const views = {
         `<form data-form="search" class="grid2" style="grid-template-columns:1fr auto"><input name="q" placeholder="Nom ou ticker : MSCI World, TotalEnergies…" value="${esc(sr?.q)}" required><button class="small">Chercher</button></form>`
         + (sr ? sr.results.map((r, k) => `<div class="op"><div class="l">${esc(r.name)}<div class="muted">${esc(r.symbol)} · ${esc(r.type)} · ${esc(r.region)} · ${esc(r.currency)}</div></div>`
           + `<div class="r">${btn('pick', k, target ? 'Choisir' : 'Suivre', 'small')}</div></div>`).join('') || empty('Aucun résultat : essayez le ticker ou un autre nom.') : '')
-        + (ready ? '' : empty('La recherche utilise votre clé Alpha Vantage : renseignez-la dans « Clés et données envoyées » plus bas.')));
+        + (ready ? '' : empty('La recherche utilise votre clé Alpha Vantage : renseignez-la dans « Clés et données envoyées » plus bas.'))
+        + (target ? '' : `<div style="margin-top:8px">${btn('starters', '', '＋ Ajouter des ETF de comparaison (monde, S&P 500, Europe, émergents)', 'ghost')}</div>`
+          + empty('Les titres suivis mais pas détenus sont des candidats : l’enveloppe du mois va au meilleur signal d’achat.')));
     };
 
     return (view.inst ? sheet(view.inst) : '')
@@ -249,6 +251,7 @@ const views = {
       <input name="opening" inputmode="decimal" placeholder="Solde initial €" value="${a ? euros(a.opening) : ''}">
       <label class="chk"><input type="checkbox" name="liquid"${!a || a.liquid ? ' checked' : ''}> Inclure dans les liquidités</label>
       <label class="chk"><input type="checkbox" name="savings"${a?.savings ? ' checked' : ''}> Compte épargne</label>
+      <label class="chk"><input type="checkbox" name="fractional"${a?.fractional ? ' checked' : ''}> Courtier acceptant les fractions de parts (ex. Trade Republic, IBKR)</label>
       <div class="grid2"><button class="${a ? 'ghost' : ''}">${a ? 'Enregistrer' : 'Ajouter le compte'}</button>${a ? btn('delAcc', a.id, 'Supprimer', 'danger') : ''}</div>
       ${a ? empty('Solde actuel : ' + eur(B.balance(S, a))) : ''}</form>`;
     const catForm = c => `<form data-form="cat" class="grid2" style="grid-template-columns:2fr 1fr auto${c ? ' auto' : ''};margin-bottom:6px"><input type="hidden" name="id" value="${c?.id ?? ''}">
@@ -340,6 +343,7 @@ const actions = {
   },
   findSymbol: async isin => { const i = S.instruments.find(x => x.isin === isin); view.search = { q: i.name, forIsin: isin, results: await searchSymbols(S, i.name) }; scrollTo(0, 0); },
   cancelSearch: () => { view.search = null; },
+  starters: () => { const n = B.addStarterEtfs(S); alert(n ? `${n} ETF ajouté(s) à la liste de suivi. Actualisez pour obtenir leur cours.` : 'Ces ETF sont déjà suivis.'); },
   pick: k => {
     const r = view.search.results[+k], target = S.instruments.find(x => x.isin === view.search.forIsin);
     if (target) { Object.assign(target, { symbol: r.symbol, currency: r.currency, type: r.type, place: r.region }); delete S.quotes[target.isin]; delete S.history[target.isin]; }
@@ -410,7 +414,7 @@ const forms = {
     Object.assign(S.settings, { reserve, globalCap, alertPct });
   },
   account: f => {
-    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on' };
+    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on', fractional: f.fractional === 'on' };
     if (f.id) Object.assign(S.accounts.find(x => x.id === f.id), a); else S.accounts.push({ id: B.uid(), ...a });
   },
   cat: f => {

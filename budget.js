@@ -209,6 +209,17 @@ export function saveInstrument(s, f) {
   return id;
 }
 
+// Broad index ETFs listed in Paris, offered as a comparison base for new purchases (a starting list, not a recommendation).
+// shortcut: Alpha Vantage symbols guessed (.PAR); « Changer de cotation » on the title's sheet fixes a wrong one.
+export const STARTER_ETFS = [
+  { isin: 'LU1681043599', name: 'Amundi MSCI World (CW8)', symbol: 'CW8.PAR' },
+  { isin: 'FR0011871128', name: 'Amundi PEA S&P 500 (PSP5)', symbol: 'PSP5.PAR' },
+  { isin: 'LU0908500753', name: 'Amundi Stoxx Europe 600 (MEUD)', symbol: 'MEUD.PAR' },
+  { isin: 'FR0013412020', name: 'Amundi PEA MSCI Emerging Markets (PAEEM)', symbol: 'PAEEM.PAR' },
+];
+export const addStarterEtfs = s => STARTER_ETFS.filter(e => !s.instruments.some(i => i.isin === e.isin))
+  .map(e => saveInstrument(s, { ...e, currency: 'EUR', place: 'Euronext Paris', type: 'ETF' })).length;
+
 // Broad ETFs rarely make headlines themselves: their news is searched by index name.
 export function newsQuery(i) {
   const idx = i.name.match(/MSCI [A-Z][\w ]*?(?= UCITS| ETF| \(|$)|S&P ?500|NASDAQ[- ]?100|STOXX ?(Europe )?\d+|CAC ?40|DAX/i);
@@ -412,20 +423,26 @@ export function suggestions(s, today) {
   const pick = left > 0 && out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score)[0];
   if (pick) {
     const i = s.instruments.find(x => x.isin === pick.isin), line = lines.find(l => l.isin === pick.isin);
-    const account = line ? s.accounts.find(a => a.id === line.accountId)
-      : s.accounts.filter(a => s.ops.some(o => o.kind === 'invest' && o.accountId === a.id)).sort((a, b) => balance(s, b) - balance(s, a))[0];
-    if (!account) pick.reasons.push({ pts: 0, text: 'Enveloppe du mois : aucun compte titres connu pour acheter.' });
+    const accounts = line ? [s.accounts.find(a => a.id === line.accountId)]
+      : s.accounts.filter(a => s.snapshots?.[a.id] || s.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
+    const fxCost = i.currency === 'EUR' ? 0 : p.fxPct / 100;
+    const raw = (s.quotes[i.isin].price * 100 * (1 + fxCost)) / (i.currency === 'EUR' ? 1 : s.fx[i.currency].rate);
+    const unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
+    // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
+    const plan = a => {
+      const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);
+      const limit = known ? Math.min(left, cash) : left;
+      const qty = a.fractional ? Math.max(0, Math.floor(((limit - p.fee) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - p.fee) / unit));
+      return { a, limit, qty, total: qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + p.fee : 0,
+        where: !known ? 'reliquat de l’enveloppe, encaisse inconnue' : cash < left ? `limité par l’encaisse ${a.name}` : 'reliquat de l’enveloppe' };
+    };
+    const best = accounts.map(plan).sort((x, y) => y.total - x.total)[0];
+    const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
+    if (!best) pick.reasons.push({ pts: 0, text: 'Enveloppe du mois : aucun compte titres connu pour acheter.' });
+    else if (!best.qty) pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${euro(best.limit)} disponibles (${best.where}), insuffisant pour une part (${euro(unit)}) et les frais. Un compte acceptant les fractions de parts le permettrait.` });
     else {
-      const cash = balance(s, account), limit = Math.min(left, cash), fxCost = i.currency === 'EUR' ? 0 : p.fxPct / 100;
-      const raw = (s.quotes[i.isin].price * 100 * (1 + fxCost)) / (i.currency === 'EUR' ? 1 : s.fx[i.currency].rate);
-      const unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
-      const qty = Math.max(0, Math.floor((limit - p.fee) / unit)); // shortcut: whole shares only, fractional orders not modelled
-      const where = cash < left ? `limité par l’encaisse ${account.name}` : 'reliquat de l’enveloppe';
-      if (qty < 1) pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${euro(limit)} disponibles (${where}), insuffisant pour une part (${euro(unit)}) et les frais.` });
-      else {
-        pick.buy = { qty, total: qty * unit + p.fee, limit, accountId: account.id };
-        pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${qty} part(s) pour environ ${euro(pick.buy.total)} frais compris (${where} : ${euro(limit)}).` });
-      }
+      pick.buy = { qty: best.qty, total: best.total, limit: best.limit, accountId: best.a.id };
+      pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${parts(best.qty)} sur ${best.a.name} pour environ ${euro(best.total)} frais compris (${best.where} : ${euro(best.limit)}).` });
     }
   }
   return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));

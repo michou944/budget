@@ -226,6 +226,24 @@ test('Verdict: the under-target title gets the envelope purchase, fees included,
   assert.equal(v.buy, undefined); assert.match(v.reasons.at(-1).text, /insuffisant/);
 });
 
+test('Verdict: with 100 € a fractional-share account buys part of an expensive share; unknown cash does not block', () => {
+  const s = p03(0);
+  s.settings.profile.targets = { [CW8]: 100 }; // CW8 at 561,20 € is the buy candidate
+  B.addEnvelope(s, M, 10000);
+  assert.match(verdict(s, CW8).reasons.at(-1).text, /insuffisant/); // whole shares only, and 0 € known cash
+  s.accounts.push({ id: 't', name: 'TR', institution: 'TR', opening: 0, liquid: false, savings: false, fractional: true });
+  B.applySnapshot(s, 't', { date: '2026-11-01', lines: [] }, 'test'); // a brokerage account whose cash the app does not know
+  const v = verdict(s, CW8);
+  assert.equal(v.buy.accountId, 't'); assert.equal(v.buy.qty, 0.176); assert.ok(v.buy.total <= 10000);
+  assert.match(v.reasons.at(-1).text, /0,176 part sur TR .*encaisse inconnue/);
+});
+
+test('Comparison ETFs are added once, as candidates, with their news searched by index', () => {
+  const s = base();
+  assert.equal(B.addStarterEtfs(s), 4); assert.equal(B.addStarterEtfs(s), 0);
+  assert.deepEqual(s.instruments.map(B.newsQuery), ['MSCI World', 'S&P 500', 'Stoxx Europe 600', 'MSCI Emerging Markets']);
+});
+
 test('Verdict: a non-EUR purchase includes conversion cost and stays within the limit', () => {
   const s = p03(500000);
   s.settings.profile.targets = { [AAPL]: 100 };
