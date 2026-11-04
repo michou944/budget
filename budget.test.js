@@ -178,6 +178,16 @@ test('P01: refresh is opt-in, stores 100 days of closes, logs hosts without the 
   assert.equal(calls.length, n + 1); // only the failed AAPL quote is retried
 });
 
+test('Refresh spends the daily quota on the biggest positions first', async () => {
+  const { refreshMarket } = await import('./market.js');
+  const s = withInstruments(), calls = [];
+  B.addHolding(s, 'b', ETF, '2025-01-01', 1, 10000);
+  B.addHolding(s, 'b', AAPL, '2025-01-01', 1, 90000);
+  Object.assign(s.settings.market, { enabled: true, avKey: 'K' });
+  await refreshMarket(s, T, async url => { calls.push(url); return { ok: true, json: async () => (url.includes('frankfurter') ? { rates: {} } : { Information: 'quota' }) }; });
+  assert.match(calls.find(u => u.includes('alphavantage')), /symbol=AAPL/); // 900 € line before the 100 € one
+});
+
 test('Adding a title: name search gives symbol, type and currency; no ISIN needed; news searched by name or index', async () => {
   const { searchSymbols } = await import('./market.js');
   const s = base();

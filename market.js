@@ -2,7 +2,14 @@
 // What leaves the phone: provider keys (Alpha Vantage, Marketaux), IP address, searched names, symbols and currencies.
 // Quantities, amounts, accounts and operations never do.
 
-import { setHistory, addNews, pruneNews, newsQuery } from './budget.js';
+import { setHistory, addNews, pruneNews, newsQuery, valuation } from './budget.js';
+
+// Free quotas are small: biggest positions first, then titles with a target, then the watchlist.
+function byImportance(s, today) {
+  const val = {}, t = s.settings.profile.targets;
+  for (const l of valuation(s, today)) val[l.isin] = (val[l.isin] ?? 0) + (l.value ?? l.cost);
+  return [...s.instruments].sort((a, b) => (val[b.isin] ?? 0) - (val[a.isin] ?? 0) || (t[b.isin] ?? 0) - (t[a.isin] ?? 0));
+}
 
 const AV = 'https://www.alphavantage.co/query', FX = 'https://api.frankfurter.dev/v1/latest', NEWS = 'https://api.marketaux.com/v1/news/all';
 const enc = encodeURIComponent;
@@ -40,7 +47,7 @@ export async function refreshMarket(s, today, fetchFn = fetch) {
     } catch (e) { errors.push(`Change : ${e.message}`); }
   }
   if (!m.avKey) return [...errors, 'Clé Alpha Vantage manquante : cours non actualisés'];
-  for (const i of s.instruments.filter(i => s.quotes[i.isin]?.fetchedAt !== today)) {
+  for (const i of byImportance(s, today).filter(i => s.quotes[i.isin]?.fetchedAt !== today)) {
     if (!i.symbol) { errors.push(`${i.name} : pas de symbole de cours (ouvrez sa fiche, « Trouver le cours »)`); continue; }
     let j;
     try { j = await get(s, `${AV}?function=TIME_SERIES_DAILY&outputsize=compact&symbol=${enc(i.symbol)}&apikey=${enc(m.avKey)}`, [i.symbol], fetchFn); }
@@ -59,7 +66,7 @@ export async function refreshNews(s, today, fetchFn = fetch) {
   const m = s.settings.market, errors = [];
   if (!m.enabled) throw new Error('Données de marché désactivées');
   if (!m.newsKey) return ['Clé Marketaux manquante : actualités non actualisées'];
-  for (const i of s.instruments.filter(i => s.newsFetched[i.isin] !== today)) {
+  for (const i of byImportance(s, today).filter(i => s.newsFetched[i.isin] !== today)) {
     const q = newsQuery(i);
     let j;
     try { j = await get(s, `${NEWS}?search=${enc(`"${q}"`)}&language=fr,en&api_token=${enc(m.newsKey)}`, [q], fetchFn); }
