@@ -1,5 +1,5 @@
 import * as B from './budget.js';
-import { refreshMarket, refreshNews, searchSymbols } from './market.js';
+import { refreshMarket, refreshNews, searchSymbols, discover } from './market.js';
 
 const KEY = 'budget.v1';
 const app = document.getElementById('app');
@@ -150,9 +150,9 @@ const views = {
       const ls = lines.filter(l => l.isin === x.isin), q = S.quotes[x.isin], i = inst(x.isin);
       const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
       const gain = ls.reduce((a, l) => a + (l.gain ?? 0), 0);
-      return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}`
+      return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
-        + (x.buy ? `<div class="good">Enveloppe : ${x.buy.qty} part(s) ≈ ${eur(x.buy.total)}</div>` : '') + '</div>'
+        + (x.buy ? `<div class="good">Enveloppe : ${num(x.buy.qty)} part(s) ≈ ${eur(x.buy.total)}</div>` : '') + '</div>'
         + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
@@ -189,17 +189,20 @@ const views = {
         + (sr ? sr.results.map((r, k) => `<div class="op"><div class="l">${esc(r.name)}<div class="muted">${esc(r.symbol)} · ${esc(r.type)} · ${esc(r.region)} · ${esc(r.currency)}</div></div>`
           + `<div class="r">${btn('pick', k, target ? 'Choisir' : 'Suivre', 'small')}</div></div>`).join('') || empty('Aucun résultat : essayez le ticker ou un autre nom.') : '')
         + (ready ? '' : empty('La recherche utilise votre clé Alpha Vantage : renseignez-la dans « Clés et données envoyées » plus bas.'))
-        + (target ? '' : `<div style="margin-top:8px">${btn('starters', '', '＋ Ajouter des ETF de comparaison (monde, S&P 500, Europe, émergents)', 'ghost')}</div>`
-          + empty('Les titres suivis mais pas détenus sont des candidats : l’enveloppe du mois va au meilleur signal d’achat.')));
+);
     };
 
     return (view.inst ? sheet(view.inst) : '')
       + (view.search?.forIsin ? searchCard() : '')
-      + (ready ? `<div style="margin-bottom:12px">${btn('refreshAll', '', 'Actualiser cours et actualités', '')}</div>` : '')
-      + card('Mes titres', (sug.map(titleRow).join('') || empty('Aucun titre. Cherchez-en un ci-dessous ou importez un relevé courtier.'))
+      + (ready ? `<div style="margin-bottom:12px">${btn('refreshAll', '', 'Actualiser et chercher des idées', '')}</div>` : '')
+      + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (plus bas).'))
         + (lines.length ? row('Valeur des positions', total(lines), 'total') : '')
         + (missing ? `<div class="warn">${missing} ligne(s) sans cours, exclue(s) du total.</div>` : '')
-        + `<div class="muted" style="margin-top:6px">Touchez un titre pour voir le détail. ${B.DISCLAIMER}</div>`)
+        + empty('Touchez un titre pour voir pourquoi : Renforcer, Conserver, Alléger ou Vendre.'))
+      + card('Idées d’achat', (sug.filter(x => !x.held).sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || b.score - a.score).map(titleRow).join('')
+          || empty(ready && mk.newsKey ? 'Appuyez sur « Actualiser et chercher des idées ».' : 'Renseignez vos deux clés (« Clés et données envoyées » plus bas) pour que l’outil cherche des idées.'))
+        + empty(`Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif (Marketaux), vérifie la tendance de leur cours (Alpha Vantage) et garde les ${5} meilleures. L’enveloppe du mois va au meilleur signal « Acheter ».`)
+        + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
       + (view.search?.forIsin ? '' : searchCard())
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
         (envs.map(e => `<div class="op"><div class="l">${esc(e.label)}<div class="muted">${eur(e.amount)} affectés · ${eur(B.envelopeUsed(S, e.id))} achetés${e.released ? ' · reliquat libéré' : ''}</div></div>`
@@ -261,7 +264,15 @@ const views = {
         + fold('accNew', '＋ Nouveau compte', accountForm(null), !S.accounts.length))
       + fold('budget', 'Réserve, plafond global et alertes', `<form data-form="settings"><label>Réserve mensuelle (€)<input name="reserve" inputmode="decimal" value="${euros(st.reserve)}"></label>
         <label>Plafond mensuel global (€, vide = aucun)<input name="globalCap" inputmode="decimal" value="${euros(st.globalCap)}"></label>
-        <label>Seuil d’alerte (%)<input name="alertPct" type="number" min="1" max="100" value="${st.alertPct}"></label><button>Enregistrer</button></form>`)
+        <label>Seuil d’alerte des plafonds (%)<input name="alertPct" type="number" min="1" max="100" value="${st.alertPct}"></label>
+        <label>Alerte quand le dépensable du mois passe sous (€, vide = jamais)<input name="lowSpendable" inputmode="decimal" value="${euros(st.lowSpendable)}"></label><button>Enregistrer</button></form>`)
+      + fold('notif', `Notifications${st.notify && canNotify() && Notification.permission === 'granted' ? ' · <span class="good">activées</span>' : ''}`,
+        (canNotify() ? (st.notify && Notification.permission === 'granted'
+          ? `<div class="grid2">${btn('testNotif', '', 'Envoyer un essai', 'ghost')}${btn('notifOff', '', 'Désactiver', 'ghost')}</div>`
+          : `<button data-act="notifOn">Activer les notifications</button>${Notification.permission === 'denied' ? empty('Refusées dans les réglages du téléphone : autorisez-les pour cette app, puis réessayez.') : ''}`)
+          : empty('Sur iPhone : ajoutez d’abord l’app à l’écran d’accueil (iOS 16.4 ou plus), puis ouvrez-la depuis l’icône.'))
+        + empty('Vous êtes prévenu quand un avis change (Acheter, Renforcer, Alléger, Vendre, À examiner), quand un plafond de catégorie est atteint, et quand le dépensable passe sous le seuil choisi dans « Réserve, plafond global et alertes ».')
+        + empty('Sans serveur, les avis sont calculés quand l’app est ouverte ou actualisée, pas pendant qu’elle est fermée.'))
       + fold('cats', 'Catégories et plafonds mensuels', S.categories.map(catForm).join('') + catForm(null))
       + fold('backup', 'Sauvegarde et export', `<form data-form="backup"><input type="password" name="pw" placeholder="Mot de passe (8 caractères min.)" autocomplete="new-password" required>
         <button>Télécharger une sauvegarde chiffrée</button></form><br>
@@ -338,12 +349,22 @@ const actions = {
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
   refreshAll: async () => {
-    const errs = [...await refreshMarket(S, today()), ...(S.settings.market.newsKey ? await refreshNews(S, today()) : [])];
-    alert(errs.length ? errs.join('\n') : 'Cours, change et actualités à jour.');
+    const t = today(), errs = [...await refreshMarket(S, t)];
+    if (S.settings.market.newsKey) {
+      errs.push(...await refreshNews(S, t));
+      try { errs.push(...await discover(S, t)); } catch (e) { errs.push(`Recherche d’idées : ${e.message}`); }
+    }
+    alert(errs.length ? errs.join('\n') : 'Cours, actualités et idées à jour.');
   },
   findSymbol: async isin => { const i = S.instruments.find(x => x.isin === isin); view.search = { q: i.name, forIsin: isin, results: await searchSymbols(S, i.name) }; scrollTo(0, 0); },
   cancelSearch: () => { view.search = null; },
-  starters: () => { const n = B.addStarterEtfs(S); alert(n ? `${n} ETF ajouté(s) à la liste de suivi. Actualisez pour obtenir leur cours.` : 'Ces ETF sont déjà suivis.'); },
+  notifOn: async () => {
+    if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications refusées : autorisez-les dans les réglages du téléphone.');
+    S.settings.notify = true; // the advice already shown on screen counts as known: only changes are announced from now on
+    B.markNotified(S, [], today());
+  },
+  notifOff: () => { S.settings.notify = false; },
+  testNotif: async () => (await navigator.serviceWorker.ready).showNotification('Budget', { body: 'Les notifications fonctionnent.', icon: 'apple-touch-icon.png' }),
   pick: k => {
     const r = view.search.results[+k], target = S.instruments.find(x => x.isin === view.search.forIsin);
     if (target) { Object.assign(target, { symbol: r.symbol, currency: r.currency, type: r.type, place: r.region }); delete S.quotes[target.isin]; delete S.history[target.isin]; }
@@ -409,9 +430,9 @@ const forms = {
   holding: f => B.addHolding(S, f.accountId, f.isin, f.date, decimal(f.qty), parseEur(f.cost)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {
-    const reserve = parseEur(f.reserve), globalCap = parseEur(f.globalCap), alertPct = Number(f.alertPct);
-    if (reserve < 0 || globalCap < 0 || !(Number.isInteger(alertPct) && alertPct >= 1 && alertPct <= 100)) throw new Error('Valeurs invalides');
-    Object.assign(S.settings, { reserve, globalCap, alertPct });
+    const reserve = parseEur(f.reserve), globalCap = parseEur(f.globalCap), alertPct = Number(f.alertPct), lowSpendable = parseEur(f.lowSpendable);
+    if (reserve < 0 || globalCap < 0 || lowSpendable < 0 || !(Number.isInteger(alertPct) && alertPct >= 1 && alertPct <= 100)) throw new Error('Valeurs invalides');
+    Object.assign(S.settings, { reserve, globalCap, alertPct, lowSpendable });
   },
   account: f => {
     const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on', fractional: f.fractional === 'on' };
@@ -453,6 +474,19 @@ function render() {
 async function run(fn) {
   try { await fn(); save(); } catch (err) { alert(err.message); }
   render();
+  notify();
+}
+
+// Sends the new advice and budget alerts as phone notifications (only while the app is running: no server).
+const canNotify = () => 'Notification' in window && 'serviceWorker' in navigator;
+async function notify() {
+  if (!S.settings.notify || !canNotify() || Notification.permission !== 'granted') return;
+  const list = B.pendingNotifications(S, today());
+  if (!list.length) return;
+  const reg = await navigator.serviceWorker.ready;
+  for (const x of list) await reg.showNotification(x.title, { body: x.body, tag: x.id, icon: 'apple-touch-icon.png', data: { tab: x.id.startsWith('v|') || x.id.startsWith('sum|') ? 'stock' : 'dash' } });
+  B.markNotified(S, list, today());
+  save();
 }
 
 document.addEventListener('click', e => {
@@ -484,4 +518,7 @@ document.addEventListener('toggle', e => { // 'toggle' does not bubble: listen i
 
 navigator.storage?.persist?.(); // ask the browser not to evict local data
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+const startTab = new URLSearchParams(location.search).get('tab'); // set by a tapped notification
+if (views[startTab]) view.tab = startTab;
 render();
+notify();

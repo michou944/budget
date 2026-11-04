@@ -188,6 +188,57 @@ test('Refresh spends the daily quota on the biggest positions first', async () =
   assert.match(calls.find(u => u.includes('alphavantage')), /symbol=AAPL/); // 900 € line before the 100 € one
 });
 
+test('Market scan: the tool picks its own ideas from news trends and price history, within the daily quota', async () => {
+  const { discover, toAv, SCAN_CALLS } = await import('./market.js');
+  const s = withInstruments(); // already follows EUNL.DEX and AAPL
+  await assert.rejects(discover(s, T, () => assert.fail()), /Activez/);
+  Object.assign(s.settings.market, { enabled: true, avKey: 'K', newsKey: 'N' });
+  const rising = Object.fromEntries(Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), { '4. close': String(50 + 0.2 * k) }]));
+  let trending = [
+    { key: 'AAPL', total_documents: 90, sentiment_avg: 0.5 }, // already followed
+    { key: 'NVDA', total_documents: 80, sentiment_avg: 0.4 },
+    { key: 'MC.PA', total_documents: 30, sentiment_avg: 0.3 },
+    { key: 'BP.L', total_documents: 50, sentiment_avg: 0.5 }, // London: not priced by the app
+    { key: 'XOM', total_documents: 40, sentiment_avg: -0.3 }, // negative tone
+    ...['TA', 'TB', 'TC', 'TD', 'TE', 'TF'].map(key => ({ key, total_documents: 6, sentiment_avg: 0.2 }))];
+  const calls = [];
+  const fake = async url => {
+    calls.push(url);
+    const body = url.includes('trending') ? { data: trending }
+      : url.includes('entity/search') ? { data: [{ symbol: 'NVDA', name: 'NVIDIA Corporation' }, { symbol: 'MC.PA', name: 'LVMH' }] }
+        : { 'Time Series (Daily)': rising };
+    return { ok: true, json: async () => body };
+  };
+  assert.deepEqual(await discover(s, T, fake), []);
+  const ideas = s.instruments.filter(i => i.auto);
+  assert.equal(ideas.length, SCAN_CALLS); assert.equal(s.avCalls.n, SCAN_CALLS);
+  assert.deepEqual(ideas.slice(0, 2).map(i => [i.isin, i.name, i.currency]), [['NVDA', 'NVIDIA Corporation', 'USD'], ['MC.PAR', 'LVMH', 'EUR']]);
+  const v = verdict(s, 'MC.PAR'); // rising price + positive coverage
+  assert.equal(v.action, 'Acheter'); assert.ok(v.reasons.some(r => /Repéré par l’outil : 30 articles/.test(r.text) && r.source === 'Marketaux'));
+  const n = calls.length;
+  await discover(s, T, fake); assert.equal(calls.length, n); // once a day
+  B.addHolding(s, 'b', 'MC.PAR', T, 1, 7000); // the idea was bought
+  trending = trending.slice(0, 2);
+  await discover(s, '2026-11-04', fake);
+  assert.deepEqual(s.instruments.filter(i => i.auto).map(i => i.isin), ['MC.PAR', 'NVDA']); // yesterday's ideas replaced, the bought one kept
+  assert.deepEqual([toAv('BP.L'), toAv('SAP.DE')], [undefined, { symbol: 'SAP.DEX', currency: 'EUR' }]);
+});
+
+test('Market scan falls back to recent market articles when the trending endpoint is not in the plan', async () => {
+  const { discover } = await import('./market.js');
+  const s = withInstruments();
+  Object.assign(s.settings.market, { enabled: true, avKey: 'K', newsKey: 'N' });
+  const rising = Object.fromEntries(Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), { '4. close': String(50 + 0.2 * k) }]));
+  const fake = async url => {
+    if (url.includes('trending')) return { ok: false, status: 402 };
+    const body = url.includes('news/all') ? { data: [{ entities: [{ type: 'equity', symbol: 'SAP.DE', sentiment_score: 0.6 }, { type: 'index', symbol: 'DAX' }] }] }
+      : url.includes('frankfurter') ? { date: T, rates: {} } : { 'Time Series (Daily)': rising };
+    return { ok: true, json: async () => body };
+  };
+  await discover(s, T, fake);
+  assert.deepEqual(s.instruments.filter(i => i.auto).map(i => i.isin), ['SAP.DEX']);
+});
+
 test('Adding a title: name search gives symbol, type and currency; no ISIN needed; news searched by name or index', async () => {
   const { searchSymbols } = await import('./market.js');
   const s = base();
@@ -238,12 +289,6 @@ test('Verdict: with 100 € a fractional-share account buys part of an expensive
   assert.match(v.reasons.at(-1).text, /0,176 part sur TR .*encaisse inconnue/);
 });
 
-test('Comparison ETFs are added once, as candidates, with their news searched by index', () => {
-  const s = base();
-  assert.equal(B.addStarterEtfs(s), 4); assert.equal(B.addStarterEtfs(s), 0);
-  assert.deepEqual(s.instruments.map(B.newsQuery), ['MSCI World', 'S&P 500', 'Stoxx Europe 600', 'MSCI Emerging Markets']);
-});
-
 test('Verdict: a non-EUR purchase includes conversion cost and stays within the limit', () => {
   const s = p03(500000);
   s.settings.profile.targets = { [AAPL]: 100 };
@@ -288,6 +333,10 @@ test('Verdict: risk limits of the profile on held titles — trailing stop, max 
   assert.equal(verdict(s, ETF).action, 'Vendre');
   s.settings.profile.risk = 'dynamique';
   assert.equal(verdict(s, ETF).action, 'Conserver');
+  s.settings.profile.risk = 'equilibre';
+  B.setHistory(s, ETF, [...closes(60, -0.1).slice(0, 99), [T, 79]], 'Alpha Vantage', T); // rising trend, but still −21 % vs cost
+  const v = verdict(s, ETF);
+  assert.ok(v.score >= -0.5); assert.equal(v.action, 'Alléger'); // the loss limit is never outvoted into « Conserver »
 });
 
 test('P02: news is opt-in, searched by name, web links only, tone kept, one call per title per day, key never logged', async () => {
@@ -431,6 +480,32 @@ test('Deleting a title removes its trades, snapshot line, price, news and target
   B.deleteInstrument(s, ETF); B.deleteInstrument(s, 'FR0000120271');
   assert.deepEqual(B.positions(s).map(p => p.isin), ['US1912161007', 'JP3164630000']);
   assert.ok(!s.instruments.some(i => i.isin === ETF) && !s.quotes['FR0000120271'] && !s.news.length && !(ETF in s.settings.profile.targets));
+});
+
+test('Notifications: a verdict is announced when it changes, budget alerts once a month, many verdicts as one summary', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
+  B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'Alpha Vantage', T);
+  s.settings.profile.horizon = 3; // trailing stop → « Vendre »
+  op(s, 'income', 1000); op(s, 'expense', 950); // 50 € left, under the 100 € threshold
+  let p = B.pendingNotifications(s, T);
+  assert.deepEqual(p.map(x => x.title), ['Vendre : World', 'Pouvoir d’achat presque atteint']);
+  assert.match(p[1].body, /50,00 €/);
+  B.markNotified(s, p, T);
+  assert.deepEqual(B.pendingNotifications(s, T), []); // nothing new, nothing sent
+  s.settings.profile.horizon = 10; // → « Conserver »: not something to act on, not announced
+  assert.deepEqual(B.pendingNotifications(s, T), []);
+  B.markNotified(s, [], T);
+  s.settings.profile.horizon = 3; // back to « Vendre »: a change again
+  assert.deepEqual(B.pendingNotifications(s, T).map(x => x.title), ['Vendre : World']);
+  for (const k of [1, 2, 3, 4]) { // five sell signals at once → one summary
+    const id = `XX000000000${k}`;
+    B.saveInstrument(s, { isin: id, name: `T${k}`, currency: 'EUR' });
+    B.addHolding(s, 'b', id, '2025-01-01', 10, 100000);
+    B.setHistory(s, id, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'Alpha Vantage', T);
+  }
+  p = B.pendingNotifications(s, T);
+  assert.equal(p.length, 1); assert.equal(p[0].title, '5 avis bourse'); assert.match(p[0].body, /^Vendre : World, T1, T2, T3, T4$/);
 });
 
 test('demo data reproduces the spec figures', () => {

@@ -14,8 +14,8 @@ export function emptyState() {
     version: 2, accounts: [], ops: [], recurring: [], envelopes: [], dismissedAlerts: [], lastImport: null,
     categories: ['Logement', 'Alimentation', 'Santé', 'Mobilité et auto', 'Impôts', 'Loisirs', 'Abonnements', 'Divers']
       .map(name => ({ id: uid(), name, cap: 0 })),
-    settings: { reserve: 0, globalCap: 0, alertPct: 80, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
-    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {},
+    settings: { reserve: 0, globalCap: 0, alertPct: 80, lowSpendable: 10000, notify: false, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
+    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {}, discovery: { date: null, items: {} }, notified: { verdicts: {}, sent: [] },
   };
 }
 
@@ -28,7 +28,12 @@ export function validateState(x) {
     x.settings.market = { enabled: false, avKey: '' };
   }
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
-    x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {};
+    x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {}; x.discovery ??= { date: null, items: {} };
+    x.settings.lowSpendable ??= 10000; x.notified ??= { verdicts: {}, sent: [] };
+    // the hand-picked comparison ETFs were withdrawn (ideas now come from the market scan): drop those never bought
+    const withdrawn = ['Amundi MSCI World (CW8)', 'Amundi PEA S&P 500 (PSP5)', 'Amundi Stoxx Europe 600 (MEUD)', 'Amundi PEA MSCI Emerging Markets (PAEEM)'];
+    x.instruments = x.instruments.filter(i => !(i.type === 'ETF' && withdrawn.includes(i.name) && !x.ops.some(o => o.isin === i.isin)
+      && !Object.values(x.snapshots).some(sn => sn.lines.some(l => l.isin === i.isin))));
   }
   const ok = x && x.version === 2 && x.settings?.market && x.quotes && x.fx
     && ['accounts', 'ops', 'recurring', 'envelopes', 'categories', 'dismissedAlerts', 'instruments', 'requestLog'].every(k => Array.isArray(x[k]))
@@ -209,17 +214,6 @@ export function saveInstrument(s, f) {
   return id;
 }
 
-// Broad index ETFs listed in Paris, offered as a comparison base for new purchases (a starting list, not a recommendation).
-// shortcut: Alpha Vantage symbols guessed (.PAR); « Changer de cotation » on the title's sheet fixes a wrong one.
-export const STARTER_ETFS = [
-  { isin: 'LU1681043599', name: 'Amundi MSCI World (CW8)', symbol: 'CW8.PAR' },
-  { isin: 'FR0011871128', name: 'Amundi PEA S&P 500 (PSP5)', symbol: 'PSP5.PAR' },
-  { isin: 'LU0908500753', name: 'Amundi Stoxx Europe 600 (MEUD)', symbol: 'MEUD.PAR' },
-  { isin: 'FR0013412020', name: 'Amundi PEA MSCI Emerging Markets (PAEEM)', symbol: 'PAEEM.PAR' },
-];
-export const addStarterEtfs = s => STARTER_ETFS.filter(e => !s.instruments.some(i => i.isin === e.isin))
-  .map(e => saveInstrument(s, { ...e, currency: 'EUR', place: 'Euronext Paris', type: 'ETF' })).length;
-
 // Broad ETFs rarely make headlines themselves: their news is searched by index name.
 export function newsQuery(i) {
   const idx = i.name.match(/MSCI [A-Z][\w ]*?(?= UCITS| ETF| \(|$)|S&P ?500|NASDAQ[- ]?100|STOXX ?(Europe )?\d+|CAC ?40|DAX/i);
@@ -275,6 +269,7 @@ export function deleteInstrument(s, isin) {
   for (const k of ['quotes', 'history', 'peaks', 'newsFetched']) delete s[k][isin];
   delete s.settings.profile.targets[isin];
   s.news = s.news.filter(n => n.isin !== isin);
+  if (s.discovery?.items) delete s.discovery.items[isin];
 }
 
 // Increasing number telling whether a trade was recorded before or after the last broker snapshot import.
@@ -401,19 +396,25 @@ export function suggestions(s, today) {
     if (tones.length >= 2) {
       const avg = tones.reduce((a, b) => a + b, 0) / tones.length;
       add(avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0, `Ton des actualités ${avg > 0.2 ? 'positif' : avg < -0.2 ? 'négatif' : 'neutre'} (${tones.length} articles sur 14 jours).`, recent[0].publishedAt, 'Marketaux');
-    } else if (!recent.length) add(0, 'Aucune actualité récente.');
+    } else if (!recent.length && !s.discovery?.items?.[i.isin]) add(0, 'Aucune actualité récente.');
+    const found = s.discovery?.items?.[i.isin];
+    if (found) add(found.tone >= 0.2 ? 1 : 0, `Repéré par l’outil : ${found.docs} articles cette semaine, ton ${found.tone >= 0.2 ? 'positif' : 'plutôt neutre'} (${found.tone.toFixed(2).replace('.', ',')}).`, found.asOf, 'Marketaux');
     const notable = recent.filter(n => NOTABLE.test(n.title));
     for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source);
+    let limitHit = false;
     for (const l of lines.filter(l => l.isin === i.isin && l.cost > 0)) {
       const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
       const drop = hi ? ((hi - q.price) * 100) / hi : 0;
-      if (gain <= -risk.maxLoss) add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`);
-      else if (p.horizon < 5 && gain > 0 && drop >= risk.trail)
+      if (gain <= -risk.maxLoss) { limitHit = true; add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`); }
+      else if (p.horizon < 5 && gain > 0 && drop >= risk.trail) {
+        limitHit = true;
         add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`);
+      }
     }
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
+    // a risk limit of the profile always leads to reducing the line, whatever the other signals say
     const action = notable.length ? 'À examiner'
-      : isHeld ? (score >= 2 ? 'Renforcer' : score <= -3 ? 'Vendre' : score <= -2 ? 'Alléger' : 'Conserver')
+      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || score <= -2 ? 'Alléger' : score >= 2 ? 'Renforcer' : 'Conserver')
         : score >= 2 ? 'Acheter' : 'Attendre';
     return { ...base, action, score };
   });
@@ -446,6 +447,40 @@ export function suggestions(s, today) {
     }
   }
   return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
+}
+
+// ---- phone notifications: only what is new, so the same advice or alert is never sent twice ----
+
+const ACTIONABLE = ['Acheter', 'Renforcer', 'Alléger', 'Vendre', 'À examiner'];
+
+export function pendingNotifications(s, today) {
+  const n = (s.notified ??= { verdicts: {}, sent: [] }), m = monthOf(today), out = [];
+  // a verdict is announced when it changes to something to act on
+  for (const x of suggestions(s, today)) {
+    if (x.suspended || !ACTIONABLE.includes(x.action) || n.verdicts[x.isin] === x.action) continue;
+    const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
+    out.push({ id: `v|${x.isin}|${x.action}`, kind: 'verdict', action: x.action, name: x.name, title: `${x.action} : ${x.name}`,
+      body: (x.buy ? `Enveloppe : ${String(x.buy.qty).replace('.', ',')} part(s) ≈ ${euro(x.buy.total)}. ` : '') + (main?.text ?? '') });
+  }
+  // budget alerts are announced once per month and threshold
+  const st = monthStats(s, m), low = s.settings.lowSpendable;
+  if (low > 0 && st.spendable <= low)
+    out.push({ id: `low|${m}`, once: true, title: 'Pouvoir d’achat presque atteint',
+      body: `Il reste ${euro(st.spendable)} dépensables ce mois${st.shortfall ? ` (manque ${euro(st.shortfall)})` : ''}.` });
+  for (const a of alerts(s, m)) out.push({ id: `a|${a.id}`, once: true, title: `Budget ${a.label} : ${a.pct} % atteint`, body: `${euro(a.spent)} dépensés sur ${euro(a.cap)}.` });
+  const fresh = out.filter(x => !x.once || !n.sent.includes(x.id));
+  // many verdicts at once (first use, big market move): one summary instead of a burst
+  const verdicts = fresh.filter(x => x.kind === 'verdict');
+  if (verdicts.length <= 3) return fresh;
+  const by = a => verdicts.filter(x => x.action === a).map(x => x.name);
+  return [{ id: `sum|${today}`, title: `${verdicts.length} avis bourse`,
+    body: ACTIONABLE.filter(a => by(a).length).map(a => `${a} : ${by(a).join(', ')}`).join(' · ') }, ...fresh.filter(x => x.kind !== 'verdict')];
+}
+
+// Remembers what was announced: current verdicts, and the one-off alerts sent.
+export function markNotified(s, sent, today) {
+  for (const x of suggestions(s, today)) if (!x.suspended) s.notified.verdicts[x.isin] = x.action;
+  s.notified.sent = [...s.notified.sent, ...sent.filter(x => x.once).map(x => x.id)].slice(-200);
 }
 
 // ---- import ----
