@@ -152,27 +152,45 @@ test('P01: valuation in euros with FX, stale quotes flagged', () => {
   assert.equal(etf.stale, true); // Friday close seen on Tuesday
 });
 
-test('P01: market refresh is opt-in, logs hosts without the key, one call per day', async () => {
+const T = '2026-11-03', CW8 = 'LU1681043599';
+const dateBack = n => new Date(Date.parse(T) - n * 864e5).toISOString().slice(0, 10);
+const closes = (end, slope) => Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), Math.round((end - slope * (99 - k)) * 100) / 100]);
+
+test('P01: refresh is opt-in, stores 100 days of closes, logs hosts without the key, one call per day', async () => {
   const { refreshMarket } = await import('./market.js');
   const s = withInstruments(), calls = [];
-  await assert.rejects(refreshMarket(s, '2026-11-03', () => assert.fail()), /désactivées/);
+  await assert.rejects(refreshMarket(s, T, () => assert.fail()), /désactivées/);
   Object.assign(s.settings.market, { enabled: true, avKey: 'SECRETKEY' });
+  const series = Object.fromEntries(Array.from({ length: 120 }, (_, k) => [dateBack(119 - k), { '4. close': String(104.5 - 0.1 * (119 - k)) }]));
   const fake = async url => {
     calls.push(url);
-    const body = url.includes('frankfurter') ? { date: '2026-11-03', rates: { USD: 1.12 } }
-      : url.includes('AAPL') ? { Information: 'rate limit' } : { 'Global Quote': { '05. price': '104.50', '07. latest trading day': '2026-11-03' } };
+    const body = url.includes('frankfurter') ? { date: T, rates: { USD: 1.12 } }
+      : url.includes('AAPL') ? { Information: 'rate limit' } : { 'Time Series (Daily)': series };
     return { ok: true, json: async () => body };
   };
-  const errors = await refreshMarket(s, '2026-11-03', fake);
-  assert.equal(s.quotes[ETF].price, 104.5); assert.equal(s.fx.USD.rate, 1.12);
+  const errors = await refreshMarket(s, T, fake);
+  assert.equal(s.quotes[ETF].price, 104.5); assert.equal(s.quotes[ETF].asOf, T); assert.equal(s.history[ETF].length, 100);
+  assert.equal(s.fx.USD.rate, 1.12);
   assert.match(errors.join(), /rate limit/);
   assert.ok(!JSON.stringify(s.requestLog).includes('SECRETKEY'));
   const n = calls.length;
-  await refreshMarket(s, '2026-11-03', fake); // only the failed AAPL quote is retried
-  assert.equal(calls.length, n + 1);
+  await refreshMarket(s, T, fake);
+  assert.equal(calls.length, n + 1); // only the failed AAPL quote is retried
 });
 
-const CW8 = 'LU1681043599', T = '2026-11-03';
+test('Adding a title: name search gives symbol, type and currency; no ISIN needed; news searched by name or index', async () => {
+  const { searchSymbols } = await import('./market.js');
+  const s = base();
+  await assert.rejects(searchSymbols(s, 'total', () => assert.fail()), /Activez/);
+  Object.assign(s.settings.market, { enabled: true, avKey: 'K' });
+  const [r] = await searchSymbols(s, 'total', async () => ({ ok: true, json: async () => ({ bestMatches: [
+    { '1. symbol': 'TTE.PAR', '2. name': 'TotalEnergies SE', '3. type': 'Equity', '4. region': 'Paris', '8. currency': 'EUR' }] }) }));
+  assert.deepEqual(r, { symbol: 'TTE.PAR', name: 'TotalEnergies SE', type: 'Equity', region: 'Paris', currency: 'EUR' });
+  assert.equal(B.saveInstrument(s, { symbol: r.symbol, name: r.name, currency: r.currency, type: r.type }), 'TTE.PAR');
+  assert.equal(B.newsQuery(s.instruments[0]), 'TotalEnergies');
+  assert.equal(B.newsQuery({ name: 'iShares Core MSCI World UCITS ETF USD (Acc)' }), 'MSCI World');
+});
+
 function p03(cash) {
   const s = withInstruments();
   B.saveInstrument(s, { isin: CW8, name: 'CW8', symbol: 'CW8.PAR', currency: 'EUR' });
@@ -182,92 +200,98 @@ function p03(cash) {
   s.settings.profile.targets = { [ETF]: 60, [CW8]: 40 };
   return s;
 }
-const buys = s => B.suggestions(s, T).filter(x => x.action === 'Acheter');
+const verdict = (s, isin) => B.suggestions(s, T).find(x => x.isin === isin);
 
-test('P03: envelope purchase goes to the most underweight line, fees included, within envelope and cash', () => {
+test('Verdict: the under-target title gets the envelope purchase, fees included, within envelope and cash', () => {
   const s = p03(500000);
   B.addEnvelope(s, M, 120000);
-  const [b] = buys(s);
-  assert.equal(b.isin, CW8); assert.equal(b.qty, 2); assert.equal(b.total, 2 * 56120 + 100);
-  assert.ok(B.suggestions(s, T).some(x => x.action === 'Alléger' && x.isin === ETF)); // 100 % vs 60 % target
+  assert.equal(verdict(s, ETF).action, 'Alléger'); // 100 % held vs 60 % target
+  let v = verdict(s, CW8);
+  assert.equal(v.action, 'Acheter'); assert.equal(v.buy.qty, 2); assert.equal(v.buy.total, 2 * 56120 + 100);
   s.accounts[1].opening = 60000; // cash now lower than the envelope
-  const [c] = buys(s);
-  assert.equal(c.qty, 1); assert.ok(c.total <= 60000); assert.match(c.reason, /encaisse/);
+  v = verdict(s, CW8);
+  assert.equal(v.buy.qty, 1); assert.ok(v.buy.total <= 60000); assert.match(v.reasons.at(-1).text, /encaisse/);
   s.accounts[1].opening = 50000;
-  assert.equal(buys(s).length, 0);
-  assert.ok(B.suggestions(s, T).some(x => x.action === 'Attendre'));
+  v = verdict(s, CW8);
+  assert.equal(v.buy, undefined); assert.match(v.reasons.at(-1).text, /insuffisant/);
 });
 
-test('P03: a non-EUR purchase includes conversion cost and stays within the limit', () => {
+test('Verdict: a non-EUR purchase includes conversion cost and stays within the limit', () => {
   const s = p03(500000);
   s.settings.profile.targets = { [AAPL]: 100 };
   B.setQuote(s, AAPL, 268.3, T); s.fx.USD = { rate: 1.1179, asOf: T, source: 'BCE' };
   B.addEnvelope(s, M, 100000);
-  const [b] = buys(s);
-  assert.equal(b.qty, 4); assert.ok(b.total <= 100000);
-  assert.ok(b.figures.some(f => f.label === 'Change EUR/USD' && f.asOf === T));
+  const v = verdict(s, AAPL);
+  assert.equal(v.action, 'Acheter'); assert.equal(v.buy.qty, 4); assert.ok(v.buy.total <= 100000);
 });
 
-test('P03: stale or missing data suspends suggestions instead of guessing', () => {
+test('Verdict: stale or missing data suspends instead of guessing', () => {
   const s = p03(500000);
   B.addHolding(s, 'b', AAPL, '2025-01-01', 2, 40000);
   B.setQuote(s, AAPL, 268.3, '2026-10-20'); s.fx.USD = { rate: 1.12, asOf: T };
   B.addEnvelope(s, M, 120000);
-  const sug = B.suggestions(s, T);
-  assert.equal(buys(s).length, 0);
-  assert.ok(sug.some(x => x.suspended && x.rule === 'Allocation cible'));
-  assert.ok(sug.some(x => x.suspended && x.rule === 'Enveloppe du mois'));
-  assert.ok(sug.some(x => x.suspended && x.isin === AAPL));
+  assert.equal(verdict(s, AAPL).action, 'Suspendu');
+  const c = verdict(s, CW8);
+  assert.equal(c.action, 'Attendre'); assert.equal(c.buy, undefined); assert.match(c.reasons[0].text, /non calculée/);
 });
 
-test('P03: profile rules — trailing stop on short horizon, max loss, otherwise hold; each signal is sourced and dated', () => {
-  const s = p03(0);
-  s.settings.profile.targets = {};
-  B.setQuote(s, ETF, 120, '2026-10-01'); B.setQuote(s, ETF, 104.5, T); // peak 120, now -12.9 %, still above cost
+test('Verdict: trend and news tone are merged into one conclusion for a new title, each reason dated and sourced', () => {
+  const s = withInstruments();
+  B.setHistory(s, ETF, closes(104.5, 0.1), 'Alpha Vantage', T); // rising: above its 50-day average, +6,4 % over 3 months
+  let v = verdict(s, ETF);
+  assert.equal(v.score, 1.5); assert.equal(v.action, 'Attendre');
+  assert.ok(v.reasons.some(r => r.pts === 1 && r.asOf === T && r.source === 'Alpha Vantage'));
+  for (const k of [1, 2]) B.addNews(s, ETF, { title: `Bonne nouvelle ${k}`, url: `https://ex.com/${k}`, source: 'ex.com', publishedAt: '2026-11-02', sentiment: 0.5 }, T);
+  v = verdict(s, ETF);
+  assert.equal(v.score, 2.5); assert.equal(v.action, 'Acheter');
+  for (const n of s.news) n.sentiment = -0.6;
+  assert.equal(verdict(s, ETF).action, 'Attendre');
+});
+
+test('Verdict: risk limits of the profile on held titles — trailing stop, max loss — else hold', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
+  B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'Alpha Vantage', T); // -12,9 % from its high, +4,5 % gain
   s.settings.profile.horizon = 3;
-  let [x] = B.suggestions(s, T);
-  assert.equal(x.action, 'Sécuriser');
-  assert.ok(x.rule && x.reason && x.figures.some(f => f.asOf === T && f.source));
+  assert.equal(verdict(s, ETF).action, 'Vendre'); // below average (−1) + trailing stop (−2)
   s.settings.profile.horizon = 10;
-  assert.equal(B.suggestions(s, T)[0].action, 'Conserver');
-  B.setQuote(s, ETF, 79, T); // -21 % vs cost, limit 20 % for "équilibré"
-  assert.equal(B.suggestions(s, T)[0].action, 'Vendre ou revoir');
+  assert.equal(verdict(s, ETF).action, 'Conserver');
+  B.setQuote(s, ETF, 79, T); // −21 % vs cost, limit 20 % for « équilibré »
+  assert.equal(verdict(s, ETF).action, 'Vendre');
   s.settings.profile.risk = 'dynamique';
-  assert.equal(B.suggestions(s, T)[0].action, 'Conserver');
+  assert.equal(verdict(s, ETF).action, 'Conserver');
 });
 
-test('P02: news is opt-in, web links only, deduplicated, one call per instrument per day, key never logged', async () => {
+test('P02: news is opt-in, searched by name, web links only, tone kept, one call per title per day, key never logged', async () => {
   const { refreshNews } = await import('./market.js');
   const s = withInstruments(), calls = [];
-  s.instruments[0].newsSymbol = 'EUNL';
   await assert.rejects(refreshNews(s, T, () => assert.fail()), /désactivées/);
   s.settings.market.enabled = true;
   assert.match((await refreshNews(s, T, () => assert.fail())).join(), /Marketaux manquante/);
   s.settings.market.newsKey = 'NEWSKEY';
   const fake = async url => {
     calls.push(url);
-    return { ok: true, json: async () => ({ data: [
-      { title: 'Fusion annoncée', url: 'https://ex.com/a', source: 'ex.com', published_at: '2026-11-02T08:00:00Z' },
+    return { ok: true, json: async () => ({ data: url.includes('World') ? [
+      { title: 'Fusion annoncée', url: 'https://ex.com/a', source: 'ex.com', published_at: '2026-11-02T08:00:00Z', entities: [{ sentiment_score: 0.4 }, { sentiment_score: 0.2 }] },
       { title: 'Piège', url: 'javascript:alert(1)', source: 'x', published_at: '2026-11-02' },
-      { title: 'Vieux', url: 'https://ex.com/old', source: 'ex.com', published_at: '2026-09-01' }] }) };
+      { title: 'Vieux', url: 'https://ex.com/old', source: 'ex.com', published_at: '2026-09-01' }] : [] }) };
   };
   assert.deepEqual(await refreshNews(s, T, fake), []);
-  assert.deepEqual(s.news.map(n => n.url), ['https://ex.com/a']); // bad link rejected, >30 days pruned
+  assert.ok(calls[0].includes('search=%22World%22'));
+  assert.deepEqual(s.news.map(n => [n.url, Math.round(n.sentiment * 10) / 10]), [['https://ex.com/a', 0.3]]); // bad link rejected, >30 days pruned
   await refreshNews(s, T, fake);
-  assert.equal(calls.length, 1);
-  await refreshNews(s, '2026-11-04', fake);
-  assert.equal(s.news.length, 1);
+  assert.equal(calls.length, 2); // one per title, not repeated the same day
   assert.ok(!JSON.stringify(s.requestLog).includes('NEWSKEY'));
 });
 
-test('P02: a notable headline from the last 14 days is flagged for review with its source and date', () => {
+test('Verdict: a notable headline from the last 14 days asks for review, with its source and date', () => {
   const s = withInstruments();
+  B.setQuote(s, ETF, 104.5, T);
   B.addNews(s, ETF, { title: 'Index change for the fund', url: 'https://ex.com/1', source: 'ex.com', publishedAt: '2026-11-01' }, T);
   B.addNews(s, ETF, { title: 'Merger completed', url: 'https://ex.com/2', source: 'ex.com', publishedAt: '2026-10-01' }, T);
-  B.addNews(s, ETF, { title: 'Quarterly report', url: 'https://ex.com/3', source: 'ex.com', publishedAt: '2026-11-02' }, T);
-  const flagged = B.suggestions(s, T).filter(x => x.action === 'À examiner');
-  assert.equal(flagged.length, 1);
-  assert.deepEqual(flagged[0].figures[0], { label: 'Article', value: 'ex.com', asOf: '2026-11-01', source: 'https://ex.com/1' });
+  const v = verdict(s, ETF);
+  assert.equal(v.action, 'À examiner');
+  assert.deepEqual(v.reasons.filter(r => /À lire/.test(r.text)).map(r => [r.asOf, r.source]), [['2026-11-01', 'ex.com']]);
 });
 
 // Columns named after IBKR Flex Query "Trades" fields; synthetic values.

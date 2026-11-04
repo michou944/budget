@@ -15,7 +15,7 @@ export function emptyState() {
     categories: ['Logement', 'Alimentation', 'Santé', 'Mobilité et auto', 'Impôts', 'Loisirs', 'Abonnements', 'Divers']
       .map(name => ({ id: uid(), name, cap: 0 })),
     settings: { reserve: 0, globalCap: 0, alertPct: 80, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
-    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {},
+    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {},
   };
 }
 
@@ -28,7 +28,7 @@ export function validateState(x) {
     x.settings.market = { enabled: false, avKey: '' };
   }
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
-    x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {};
+    x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {};
   }
   const ok = x && x.version === 2 && x.settings?.market && x.quotes && x.fx
     && ['accounts', 'ops', 'recurring', 'envelopes', 'categories', 'dismissedAlerts', 'instruments', 'requestLog'].every(k => Array.isArray(x[k]))
@@ -197,14 +197,42 @@ export const releaseEnvelope = (s, id) => { s.envelopes.find(e => e.id === id).r
 
 // ---- portfolio (lot 2, P01): consultation only, no order is ever sent ----
 
+// The `isin` field is the instrument's id: its ISIN when known, otherwise the price symbol (added from a search).
 export function saveInstrument(s, f) {
-  const isin = String(f.isin).trim().toUpperCase(), currency = String(f.currency).trim().toUpperCase();
-  if (!/^[A-Z]{2}[A-Z0-9]{9}\d$/.test(isin)) throw new Error('ISIN invalide');
+  const isin = String(f.isin ?? '').trim().toUpperCase(), symbol = (f.symbol || '').trim().toUpperCase(), currency = String(f.currency).trim().toUpperCase();
+  const id = /^[A-Z]{2}[A-Z0-9]{9}\d$/.test(isin) || s.instruments.some(x => x.isin === isin) ? isin : !isin && symbol ? symbol : null;
+  if (!id) throw new Error('ISIN invalide');
   if (!/^[A-Z]{3}$/.test(currency)) throw new Error('Devise invalide (ex. EUR)');
-  const i = { isin, name: (f.name || '').trim() || isin, symbol: (f.symbol || '').trim().toUpperCase(), place: (f.place || '').trim(), currency,
-    newsSymbol: (f.newsSymbol || '').trim().toUpperCase() };
-  const old = s.instruments.find(x => x.isin === isin);
+  const old = s.instruments.find(x => x.isin === id);
+  const i = { isin: id, name: (f.name || '').trim() || id, symbol, place: (f.place || '').trim(), currency, type: f.type || old?.type || '' };
   if (old) Object.assign(old, i); else s.instruments.push(i);
+  return id;
+}
+
+// Broad ETFs rarely make headlines themselves: their news is searched by index name.
+export function newsQuery(i) {
+  const idx = i.name.match(/MSCI [A-Z][\w ]*?(?= UCITS| ETF| \(|$)|S&P ?500|NASDAQ[- ]?100|STOXX ?(Europe )?\d+|CAC ?40|DAX/i);
+  return (idx ? idx[0] : i.name.replace(/\(.*?\)|\b(UCITS|ETF|Acc|Dist|SE|SA|Inc|Corp|PLC)\b\.?/gi, '')).replace(/\s+/g, ' ').trim();
+}
+
+// Daily closes from the price provider: keeps the last 100 and makes the latest one the current quote.
+export function setHistory(s, isin, points, source, today) {
+  const inst = s.instruments.find(i => i.isin === isin);
+  const h = points.filter(([d, p]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && p > 0).sort((a, b) => a[0].localeCompare(b[0])).slice(-100);
+  if (!inst || !h.length) return false;
+  s.history[isin] = h;
+  const [asOf, price] = h.at(-1), hi = h.reduce((m, x) => (x[1] > m[1] ? x : m));
+  s.quotes[isin] = { price, currency: inst.currency, asOf, source, fetchedAt: today };
+  trackPeak(s, isin, hi[1], hi[0]);
+  return true;
+}
+
+export function trend(s, isin) {
+  const h = s.history[isin];
+  if (!h || h.length < 50) return null;
+  const closes = h.map(x => x[1]), last = closes.at(-1);
+  return { sma50: closes.slice(-50).reduce((a, b) => a + b, 0) / 50, perf3m: (last / closes[Math.max(0, closes.length - 64)] - 1) * 100,
+    high: Math.max(...closes), asOf: h.at(-1)[0] };
 }
 
 const checkTrade = (s, isin, qty) => {
@@ -279,7 +307,8 @@ export function trackPeak(s, isin, price, asOf) {
 export function addNews(s, isin, a, today) {
   const url = String(a.url ?? '');
   if (!/^https?:\/\//i.test(url) || s.news.some(n => n.url === url)) return false; // only web links, no duplicates
-  s.news.push({ isin, title: String(a.title ?? '').slice(0, 300), url, source: String(a.source ?? ''), publishedAt: String(a.publishedAt ?? '').slice(0, 10), fetchedAt: today });
+  s.news.push({ isin, title: String(a.title ?? '').slice(0, 300), url, source: String(a.source ?? ''), publishedAt: String(a.publishedAt ?? '').slice(0, 10), fetchedAt: today,
+    sentiment: Number.isFinite(a.sentiment) ? Math.max(-1, Math.min(1, a.sentiment)) : null });
   return true;
 }
 export const pruneNews = (s, today, keepDays = 30) => { s.news = s.news.filter(n => dayNum(today) - dayNum(n.publishedAt) <= keepDays); };
@@ -300,90 +329,87 @@ export const DISCLAIMER = 'Information, pas un conseil en investissement. Aucun 
 const euro = c => `${(c / 100).toFixed(2).replace('.', ',')} €`;
 const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
 
+// One verdict per followed title, merging allocation, price trend, news tone and the profile's risk limits.
+// Each reason carries its points (+ favours buying, − favours selling), and its date and source when it has one.
 export function suggestions(s, today) {
-  const p = s.settings.profile, risk = RISK[p.risk], out = [];
-  const lines = valuation(s, today), inst = isin => s.instruments.find(i => i.isin === isin);
-  const quoteFig = (isin) => { const q = s.quotes[isin]; return { label: 'Cours', value: `${q.price} ${q.currency}`, asOf: q.asOf, source: q.source }; };
-  const fxFig = ccy => s.fx[ccy] && { label: `Change EUR/${ccy}`, value: String(s.fx[ccy].rate), asOf: s.fx[ccy].asOf, source: s.fx[ccy].source };
-  // a price is usable only if dated, in the listing currency and, outside EUR, with a current exchange rate
-  const fresh = isin => {
-    const i = inst(isin), q = s.quotes[isin];
-    return !!(i && q && q.currency === i.currency && !isStale(q.asOf, today) && (i.currency === 'EUR' || !isStale(s.fx[i.currency]?.asOf, today)));
-  };
-  const add = (isin, action, rule, reason, figures = [], risks = '', extra = {}) =>
-    out.push({ isin, name: inst(isin)?.name ?? (isin || 'Portefeuille'), action, rule, reason, figures: figures.filter(Boolean), risks, ...extra });
-  const suspend = (isin, rule, reason) => add(isin, 'Suspendu', rule, reason, [], '', { suspended: true });
-
-  // 1. allocation drift — weights are only meaningful if every held line is valued with fresh data
-  const targets = Object.entries(p.targets).filter(([, t]) => t > 0);
-  const blocked = lines.filter(l => l.value == null || l.stale);
+  const p = s.settings.profile, risk = RISK[p.risk];
+  const lines = valuation(s, today), held = new Set(lines.map(l => l.isin));
+  const blocked = [...new Set(lines.filter(l => l.value == null || l.stale).map(l => l.inst.name))];
   const byIsin = {};
   for (const l of lines) byIsin[l.isin] = (byIsin[l.isin] ?? 0) + (l.value ?? 0);
   const total = Object.values(byIsin).reduce((a, b) => a + b, 0);
   const weight = isin => (total ? ((byIsin[isin] ?? 0) * 100) / total : 0);
-  const allocOk = targets.length && !blocked.length;
-  if (targets.length && blocked.length) suspend(null, 'Allocation cible', `Données manquantes ou périmées : ${[...new Set(blocked.map(l => l.inst.name))].join(', ')}`);
-  if (allocOk) {
-    for (const isin of new Set([...targets.map(([i]) => i), ...Object.keys(byIsin)])) {
-      const t = p.targets[isin] ?? 0, w = weight(isin), drift = w - t;
-      if (Math.abs(drift) < p.driftPts) continue;
-      add(isin, drift > 0 ? 'Alléger' : 'Renforcer', 'Allocation cible',
-        `Poids actuel ${pct(w)} pour une cible de ${pct(t)} : écart de ${Math.abs(drift).toFixed(1).replace('.', ',')} points, au-delà du seuil de ${p.driftPts} points.`,
-        [{ label: 'Valeur de la ligne', value: euro(byIsin[isin] ?? 0) }, { label: 'Total du portefeuille', value: euro(total) }, s.quotes[isin] && quoteFig(isin)],
-        drift > 0 ? 'Alléger peut déclencher de la fiscalité et des frais ; une ligne forte peut continuer de monter.' : 'Renforcer augmente l’exposition à cette ligne ; vérifier sa pertinence avant d’acheter.');
-    }
-  }
+  const hasTargets = Object.values(p.targets).some(t => t > 0);
 
-  // 2. this month's envelope: buy the most underweight target, within the remaining amount and the broker's cash
-  const left = s.envelopes.filter(e => e.month === monthOf(today)).reduce((t, e) => t + envelopeLeft(s, e), 0);
-  if (left > 0) {
-    const rule = 'Enveloppe du mois';
-    if (!targets.length) suspend(null, rule, 'Définissez une allocation cible pour orienter l’achat.');
-    else if (!allocOk) suspend(null, rule, 'Allocation non calculable tant que des données manquent ou sont périmées.');
-    else {
-      const [isin] = targets.map(([i, t]) => [i, t - weight(i)]).sort((a, b) => b[1] - a[1])[0];
-      const i = inst(isin), held = lines.find(l => l.isin === isin);
-      const account = held ? s.accounts.find(a => a.id === held.accountId)
-        : s.accounts.filter(a => s.ops.some(o => o.kind === 'invest' && o.accountId === a.id)).sort((a, b) => balance(s, b) - balance(s, a))[0];
-      if (!fresh(isin)) suspend(isin, rule, 'Cours ou taux de change absent ou périmé.');
-      else if (!account) suspend(isin, rule, 'Aucun compte titres connu pour cet instrument.');
+  const out = s.instruments.map(i => {
+    const isHeld = held.has(i.isin), q = s.quotes[i.isin], reasons = [];
+    const add = (pts, text, asOf, source) => reasons.push({ pts, text, asOf, source });
+    const base = { isin: i.isin, name: i.name, held: isHeld, reasons };
+    const fxOk = i.currency === 'EUR' || !isStale(s.fx[i.currency]?.asOf, today);
+    // a missing or stale price suspends the verdict instead of guessing
+    if (!q || q.currency !== i.currency || isStale(q.asOf, today) || !fxOk) {
+      add(0, !q ? 'Aucun cours : actualisez ou saisissez-le.' : !fxOk ? `Taux de change ${i.currency} absent ou périmé.` : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source);
+      return { ...base, action: 'Suspendu', score: 0, suspended: true };
+    }
+    const t = p.targets[i.isin] ?? 0;
+    if (hasTargets && (t > 0 || isHeld)) {
+      if (blocked.length) add(0, `Allocation non calculée : cours manquant ou périmé pour ${blocked.join(', ')}.`);
       else {
-        const cash = balance(s, account), limit = Math.min(left, cash);
-        const fxCost = i.currency === 'EUR' ? 0 : p.fxPct / 100;
-        const raw = (s.quotes[isin].price * 100 * (1 + fxCost)) / (i.currency === 'EUR' ? 1 : s.fx[i.currency].rate);
-        const unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
-        const qty = Math.max(0, Math.floor((limit - p.fee) / unit)); // shortcut: whole shares only, fractional orders not modelled
-        const figs = [{ label: 'Reliquat d’enveloppe', value: euro(left) }, { label: `Encaisse ${account.name}`, value: euro(cash) },
-          quoteFig(isin), i.currency !== 'EUR' && fxFig(i.currency), { label: 'Frais estimés', value: euro(p.fee) + (fxCost ? ` + change ${p.fxPct} %` : '') }];
-        const why = `Ligne la plus sous-pondérée (${pct(weight(isin))} pour une cible de ${pct(p.targets[isin])}).`;
-        if (qty < 1) add(isin, 'Attendre', rule, `${why} Le montant disponible (${euro(limit)}${cash < left ? ', limité par l’encaisse' : ''}) ne couvre pas une part (${euro(unit)}) et les frais.`, figs);
-        else add(isin, 'Acheter', rule, `${why} ${qty} part(s) pour environ ${euro(qty * unit + p.fee)} frais compris, dans la limite de ${euro(limit)}${cash < left ? ' (encaisse)' : ' (reliquat)'}.`, figs,
-          'Le cours peut évoluer avant l’exécution ; le reliquat non utilisé peut être libéré.', { qty, total: qty * unit + p.fee, accountId: account.id, limit });
+        const w = weight(i.isin), gap = t - w, far = Math.abs(gap);
+        const pts = far < p.driftPts ? 0 : Math.sign(gap) * (far >= 2 * p.driftPts ? 2 : 1);
+        add(pts, `Poids ${pct(w)} pour une cible de ${pct(t)}${pts ? ` : ${pts > 0 ? 'sous' : 'sur'}-pondéré de ${far.toFixed(1).replace('.', ',')} points` : ', dans la tolérance'}.`);
+      }
+    }
+    const tr = trend(s, i.isin);
+    if (tr) {
+      const up = q.price >= tr.sma50;
+      add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source);
+      if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source);
+    } else add(0, 'Tendance inconnue : historique insuffisant (actualisez en ligne).');
+    const recent = s.news.filter(n => n.isin === i.isin && dayNum(today) - dayNum(n.publishedAt) <= 14);
+    const tones = recent.map(n => n.sentiment).filter(Number.isFinite);
+    if (tones.length >= 2) {
+      const avg = tones.reduce((a, b) => a + b, 0) / tones.length;
+      add(avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0, `Ton des actualités ${avg > 0.2 ? 'positif' : avg < -0.2 ? 'négatif' : 'neutre'} (${tones.length} articles sur 14 jours).`, recent[0].publishedAt, 'Marketaux');
+    } else if (!recent.length) add(0, 'Aucune actualité récente.');
+    const notable = recent.filter(n => NOTABLE.test(n.title));
+    for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source);
+    for (const l of lines.filter(l => l.isin === i.isin && l.cost > 0)) {
+      const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
+      const drop = hi ? ((hi - q.price) * 100) / hi : 0;
+      if (gain <= -risk.maxLoss) add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`);
+      else if (p.horizon < 5 && gain > 0 && drop >= risk.trail)
+        add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`);
+    }
+    const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
+    const action = notable.length ? 'À examiner'
+      : isHeld ? (score >= 2 ? 'Renforcer' : score <= -3 ? 'Vendre' : score <= -2 ? 'Alléger' : 'Conserver')
+        : score >= 2 ? 'Acheter' : 'Attendre';
+    return { ...base, action, score };
+  });
+
+  // this month's envelope goes to the strongest buy signal, within the remaining amount and the broker's cash
+  const left = s.envelopes.filter(e => e.month === monthOf(today)).reduce((a, e) => a + envelopeLeft(s, e), 0);
+  const pick = left > 0 && out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score)[0];
+  if (pick) {
+    const i = s.instruments.find(x => x.isin === pick.isin), line = lines.find(l => l.isin === pick.isin);
+    const account = line ? s.accounts.find(a => a.id === line.accountId)
+      : s.accounts.filter(a => s.ops.some(o => o.kind === 'invest' && o.accountId === a.id)).sort((a, b) => balance(s, b) - balance(s, a))[0];
+    if (!account) pick.reasons.push({ pts: 0, text: 'Enveloppe du mois : aucun compte titres connu pour acheter.' });
+    else {
+      const cash = balance(s, account), limit = Math.min(left, cash), fxCost = i.currency === 'EUR' ? 0 : p.fxPct / 100;
+      const raw = (s.quotes[i.isin].price * 100 * (1 + fxCost)) / (i.currency === 'EUR' ? 1 : s.fx[i.currency].rate);
+      const unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
+      const qty = Math.max(0, Math.floor((limit - p.fee) / unit)); // shortcut: whole shares only, fractional orders not modelled
+      const where = cash < left ? `limité par l’encaisse ${account.name}` : 'reliquat de l’enveloppe';
+      if (qty < 1) pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${euro(limit)} disponibles (${where}), insuffisant pour une part (${euro(unit)}) et les frais.` });
+      else {
+        pick.buy = { qty, total: qty * unit + p.fee, limit, accountId: account.id };
+        pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${qty} part(s) pour environ ${euro(pick.buy.total)} frais compris (${where} : ${euro(limit)}).` });
       }
     }
   }
-
-  // 3. notable issuer news in the last 14 days: something to read, never an automatic sale
-  for (const n of s.news.filter(n => NOTABLE.test(n.title) && dayNum(today) - dayNum(n.publishedAt) <= 14))
-    add(n.isin, 'À examiner', 'Actualité marquante', `« ${n.title} »`, [{ label: 'Article', value: n.source, asOf: n.publishedAt, source: n.url }],
-      'Titre repéré par mots-clés : lire l’article avant toute décision.');
-
-  // 4. per-line risk rules from the investor profile, then "hold" when nothing fires
-  for (const l of lines) {
-    if (l.value == null || l.stale) { suspend(l.isin, 'Données', l.value == null ? 'Cours ou taux de change indisponible.' : `Cours du ${l.quote?.asOf} non à jour.`); continue; }
-    const gain = l.cost ? ((l.value - l.cost) * 100) / l.cost : 0, peak = s.peaks[l.isin], price = l.quote.price;
-    const figs = [quoteFig(l.isin), { label: 'Valeur / prix de revient', value: `${euro(l.value)} / ${euro(l.cost)}` }, l.fx && fxFig(l.inst.currency)];
-    const drop = peak ? ((peak.price - price) * 100) / peak.price : 0;
-    if (l.cost && gain <= -risk.maxLoss)
-      add(l.isin, 'Vendre ou revoir', `Perte maximale (profil ${risk.label})`, `Moins-value de ${pct(-gain)}, au-delà de la limite de ${risk.maxLoss} % de votre profil.`, figs,
-        'Vendre cristallise la perte ; sur un horizon long une baisse peut être temporaire.');
-    else if (p.horizon < 5 && peak && gain > 0 && drop >= risk.trail)
-      add(l.isin, 'Sécuriser', `Stop suiveur ${risk.trail} % (horizon ${p.horizon} ans)`, `Cours ${pct(drop)} sous le plus haut observé (${peak.price} le ${peak.asOf}) avec une plus-value de ${pct(gain)}.`,
-        [...figs, { label: 'Plus haut observé', value: String(peak.price), asOf: peak.asOf }], 'Vendre peut faire manquer un rebond ; fiscalité de la plus-value.');
-    else if (!out.some(x => x.isin === l.isin))
-      add(l.isin, 'Conserver', 'Aucune règle déclenchée', `Plus- ou moins-value de ${pct(gain)}, dans les limites de votre profil ${risk.label}.`, figs);
-  }
-  return out;
+  return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
 }
 
 // ---- import ----
@@ -574,16 +600,19 @@ export function demoState(today) {
   saveInstrument(s, { isin: 'LU1681043599', name: 'Amundi MSCI World (CW8)', symbol: 'CW8.PAR', place: 'Euronext Paris', currency: 'EUR' });
   saveInstrument(s, { isin: 'IE00B4L5Y983', name: 'iShares Core MSCI World', symbol: 'EUNL.DEX', place: 'Xetra', currency: 'EUR' });
   saveInstrument(s, { isin: 'US0378331005', name: 'Apple', symbol: 'AAPL', place: 'Nasdaq', currency: 'USD' });
-  saveInstrument(s, { isin: 'FR0000120271', name: 'TotalEnergies (suivi)', symbol: 'TTE.PAR', place: 'Euronext Paris', currency: 'EUR' });
+  saveInstrument(s, { isin: 'FR0000120271', name: 'TotalEnergies', symbol: 'TTE.PAR', place: 'Euronext Paris', currency: 'EUR' });
   addHolding(s, tr, 'IE00B4L5Y983', '2025-01-15', 12, 110000);
   addHolding(s, ib, 'US0378331005', '2025-06-02', 3, 50000);
   addEnvelope(s, m, 10000, 'ETF du mois');
   buyFromEnvelope(s, s.envelopes[0].id, ib, d(3), 4000, 'CW8 (frais inclus)', 'LU1681043599', 0.0712);
-  setQuote(s, 'LU1681043599', 561.2, today, 'démo (fictif)');
-  setQuote(s, 'IE00B4L5Y983', 120, ago(30), 'démo (fictif)'); // earlier peak, so the trailing-stop rule fires
-  setQuote(s, 'IE00B4L5Y983', 104.5, today, 'démo (fictif)');
+  // 100 fictional daily closes: CW8 rising, iShares past its peak (trailing stop), TotalEnergies rising (buy candidate)
+  const series = f => Array.from({ length: 100 }, (_, k) => [ago(99 - k), Math.round(f(k / 99) * 100) / 100]);
+  setHistory(s, 'LU1681043599', series(x => 500 + 61.2 * x), 'démo (fictif)', today);
+  setHistory(s, 'IE00B4L5Y983', series(x => (x < 0.7 ? 95 + (25 * x) / 0.7 : 120 - (15.5 * (x - 0.7)) / 0.3)), 'démo (fictif)', today);
+  setHistory(s, 'FR0000120271', series(x => 50 + 8.3 * x), 'démo (fictif)', today);
   Object.assign(s.settings.profile, { horizon: 3, targets: { IE00B4L5Y983: 50, LU1681043599: 30, US0378331005: 20 } });
-  setQuote(s, 'FR0000120271', 58.3, today, 'démo (fictif)');
+  addNews(s, 'FR0000120271', { title: 'Résultats trimestriels au-dessus des attentes (fictif)', url: 'https://example.com/demo-tte-1', source: 'démo (fictif)', publishedAt: ago(3), sentiment: 0.5 }, today);
+  addNews(s, 'FR0000120271', { title: 'Hausse du dividende annoncée (fictif)', url: 'https://example.com/demo-tte-2', source: 'démo (fictif)', publishedAt: ago(5), sentiment: 0.4 }, today);
   setQuote(s, 'US0378331005', 268.3, ago(10), 'démo (fictif)');
   s.fx.USD = { rate: 1.1179, asOf: today, source: 'démo (fictif)', fetchedAt: today };
   addNews(s, 'LU1681043599', { title: 'Amundi annonce la fusion de deux ETF MSCI World (fictif)', url: 'https://example.com/demo-fusion', source: 'démo (fictif)', publishedAt: ago(2) }, today);

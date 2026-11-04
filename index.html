@@ -38,6 +38,9 @@
   nav button { flex:1; background:none; color:var(--muted); border-radius:0; padding:12px 2px; font-size:12px; }
   nav button[aria-current=page] { color:var(--accent); }
   .op.old { opacity:.55; } a { color:var(--accent); }
+  details.fold > summary { font-weight:600; cursor:pointer; padding:2px 0; } details.fold[open] > summary { margin-bottom:8px; }
+  .verdict { font-size:12px; font-weight:700; padding:1px 8px; border-radius:10px; border:1px solid currentColor; margin-left:4px; white-space:nowrap; }
+  .op.tap { cursor:pointer; } .op.tap:active { background:var(--bg); }
   .tag { font-size:11px; padding:1px 6px; border-radius:6px; border:1px solid var(--line); color:var(--muted); margin-left:4px; }
 </style>
 </head>
