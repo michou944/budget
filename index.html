@@ -40,6 +40,8 @@
   .op.old { opacity:.55; } a { color:var(--accent); }
   details.fold > summary { font-weight:600; cursor:pointer; padding:2px 0; } details.fold[open] > summary { margin-bottom:8px; }
   .verdict { font-size:12px; font-weight:700; padding:1px 8px; border-radius:10px; border:1px solid currentColor; margin-left:4px; white-space:nowrap; }
+  details.cat > summary { list-style:none; cursor:pointer; padding:4px 0 6px; } details.cat > summary::-webkit-details-marker { display:none; }
+  details.cat[open] { background:var(--bg); border-radius:8px; padding:0 6px 6px; }
   .op.tap { cursor:pointer; } .op.tap:active { background:var(--bg); }
   .tag { font-size:11px; padding:1px 6px; border-radius:6px; border:1px solid var(--line); color:var(--muted); margin-left:4px; }
 </style>

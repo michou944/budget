@@ -67,6 +67,35 @@ const bar = (name, spent, cap) => `<div style="padding:4px 0"><div class="row" s
 const onboarding = () => card('Bienvenue', empty('Aucun compte pour l’instant. Créez vos comptes et établissements, ou essayez avec des données fictives.')
   + `<div class="grid2" style="margin-top:8px"><button data-tab="settings">Créer un compte</button><button class="ghost" data-act="demo">Charger la démo</button></div>`);
 
+// Spending of the month or of the last 12 months, by category, like a bank app; a category opens on its payments.
+function spendCard(m) {
+  const year = view.period === 'year', months = B.monthsBack(m, 12), from = year ? months[0] : m;
+  const rows = B.spendingByCategory(S, from, m), total = rows.reduce((t, c) => t + c.spent, 0), max = rows[0]?.spent ?? 1;
+  const prev = B.spendingByCategory(S, months[10], months[10]).reduce((t, c) => t + c.spent, 0);
+  const seg = [['month', 'Ce mois'], ['year', '12 mois']].map(([p, t]) => `<button class="small${(p === 'year') === year ? '' : ' ghost'}" data-act="period" data-id="${p}">${t}</button>`).join('');
+  const compare = year ? `soit ${eur(Math.round(total / 12))} par mois en moyenne`
+    : prev ? `${total >= prev ? '+' : '−'}${eur(Math.abs(total - prev))} par rapport au mois précédent (${eur(prev)})` : '';
+  const chart = series => {
+    const top = Math.max(...series.map(x => x.spent), 1);
+    return `<svg viewBox="0 0 300 118" role="img" aria-label="Dépenses des 12 derniers mois" style="width:100%;height:auto;margin:6px 0 10px">`
+      + series.map((x, k) => {
+        const h = (Math.max(0, x.spent) / top) * 92;
+        return `<rect x="${k * 25 + 4}" y="${100 - h}" width="17" height="${h}" rx="3" fill="var(--accent)" opacity="${k === series.length - 1 ? 1 : 0.5}"><title>${x.month} : ${eur(x.spent)}</title></rect>`
+          + `<text x="${k * 25 + 12.5}" y="114" font-size="9" text-anchor="middle" fill="var(--muted)">${'JFMAMJJASOND'[+x.month.slice(5) - 1]}</text>`;
+      }).join('') + '</svg>';
+  };
+  const catRow = c => `<details class="cat"><summary><div class="row" style="border:0;padding:4px 0 0"><span>${esc(c.name)}</span>`
+    + `<span>${eur(c.spent)} <span class="muted">${Math.round((c.spent * 100) / total)} %</span></span></div>`
+    + `<div class="bar"><i class="${!year && c.cap && c.spent > c.cap ? 'over' : ''}" style="width:${(c.spent * 100) / max}%"></i></div>`
+    + (!year && c.cap ? `<div class="muted">plafond ${eur(c.cap)}</div>` : '') + '</summary>'
+    + [...c.ops].sort((a, b) => a.amount - b.amount).slice(0, 10).map(opItem).join('') + (c.ops.length > 10 ? empty(`… et ${c.ops.length - 10} autre(s)`) : '') + '</details>';
+  return card('Mes dépenses', `<div class="grid2" style="margin-bottom:8px">${seg}</div>`
+    + `<div style="font-size:26px;font-weight:700">${eur(total)}</div>${compare ? empty(compare) : ''}`
+    + (year ? chart(B.monthlySpending(S, m, 12)) : S.settings.globalCap ? bar('Plafond du mois', total, S.settings.globalCap) : '')
+    + (rows.map(catRow).join('') || empty('Aucune dépense sur cette période.'))
+    + (rows.length ? empty('Touchez une catégorie pour voir ses dépenses.') : ''));
+}
+
 // ---- views ----
 const views = {
   dash() {
@@ -74,7 +103,6 @@ const views = {
     const thisMonth = m === B.monthOf(today());
     const accounts = (title, list) => (list.length ? `<div class="muted" style="margin-top:8px">${title}</div>`
       + list.map(a => row(`${esc(a.name)} <span class="muted">${esc(a.institution)}</span>`, B.balance(S, a))).join('') : '');
-    const cats = B.categorySpend(S, m).filter(c => c.spent || c.cap);
     const paid = S.ops.filter(o => !o.planned && B.monthOf(o.date) === m && o.kind === 'expense').sort((a, b) => b.date.localeCompare(a.date));
     const after = [st.expectedSpent && 'ce qui reste à payer', st.reserve && `votre épargne de côté (${eur(st.reserve)})`, st.stock && `votre budget bourse (${eur(st.stock)})`].filter(Boolean);
     return monthBar(false)
@@ -86,6 +114,7 @@ const views = {
         + (st.expectedSpent ? row('Encore à payer', -st.expectedSpent) : '') + (st.expectedIncome ? row('Encore à recevoir', st.expectedIncome) : '')
         + row('Solde du mois (entrées − sorties)', st.toDate, 'total') + (st.savedTransfer ? row('Mis sur l’épargne', st.savedTransfer) : '')
         + `<div style="margin-top:6px">${btn('goOps', '', 'Voir le détail des mouvements →', 'small ghost')}</div>`)
+      + spendCard(m)
       + card(`À venir${up.length ? ` · ${up.length}` : ''}`, up.map(o => `<div class="op"><div class="l">${esc(o.label || catName(o.categoryId) || B.KINDS[o.kind])}`
         + `<div class="muted">le ${new Date(o.date + 'T12:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })} · ${esc(accName(o.accountId))}</div></div><div class="r">${money(o.amount)}`
         + `<div class="actions">${btn('edit', o.id, 'Modifier')}</div></div></div>`).join('')
@@ -95,7 +124,6 @@ const views = {
         + (paid.length > 8 ? `<div style="margin-top:6px">${btn('goOps', '', `Voir les ${paid.length} paiements →`, 'small ghost')}</div>` : '')) : '')
       + card('Mes comptes', (accounts('Comptes courants', S.accounts.filter(a => a.liquid)) + accounts('Épargne', S.accounts.filter(a => a.savings))
         + accounts('Espèces chez les courtiers', S.accounts.filter(a => !a.liquid && !a.savings))) || empty('Aucun compte : créez-en dans Réglages.'))
-      + (cats.length ? card('Dépenses par catégorie', (S.settings.globalCap ? bar('Total du mois', st.spent, S.settings.globalCap) : '') + cats.map(c => bar(c.name, c.spent, c.cap)).join('')) : '')
       + (stale.length ? fold('fresh', `<span class="warn">${stale.length} compte(s) sans mouvement depuis 30 jours</span>`,
         stale.map(x => row(esc(x.a.name), B.balance(S, x.a))).join('') + empty('Importez un relevé ou ajoutez les mouvements récents.')) : '');
   },
@@ -379,6 +407,7 @@ const actions = {
   dismiss: id => S.dismissedAlerts.push(id),
   unmatch: id => B.unmatch(S, id),
   goOps: () => { view.tab = 'ops'; scrollTo(0, 0); },
+  period: p => { view.period = p; },
   delRec: id => { S.recurring = S.recurring.filter(r => r.id !== id); },
   release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
   inst: isin => { view.inst = isin; scrollTo(0, 0); },

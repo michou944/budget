@@ -76,6 +76,24 @@ export function categorySpend(s, m, accountId) {
   return s.categories.map(c => ({ ...c, spent: spentOf(real.filter(o => o.categoryId === c.id)) }));
 }
 
+// The n months ending with m, oldest first ('2026-11', 12 → '2025-12' … '2026-11').
+export const monthsBack = (m, n) => Array.from({ length: n }, (_, k) => {
+  const d = new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1 - (n - 1 - k), 1));
+  return d.toISOString().slice(0, 7);
+});
+
+// Spending per category from month `from` to month `to` (inclusive), largest first, with each category's payments;
+// refunds reduce their category, transfers and stock purchases are not spending.
+export function spendingByCategory(s, from, to) {
+  const real = s.ops.filter(o => !o.planned && monthOf(o.date) >= from && monthOf(o.date) <= to && (o.kind === 'expense' || o.kind === 'refund'));
+  const known = new Set(s.categories.map(c => c.id));
+  return [...s.categories, { id: null, name: 'Sans catégorie', cap: 0 }]
+    .map(c => { const ops = real.filter(o => (known.has(o.categoryId) ? o.categoryId : null) === c.id); return { ...c, spent: spentOf(ops), ops }; })
+    .filter(c => c.spent > 0).sort((a, b) => b.spent - a.spent);
+}
+
+export const monthlySpending = (s, to, n = 12) => monthsBack(to, n).map(m => ({ month: m, spent: monthStats(s, m).spent }));
+
 export function alerts(s, m) {
   const out = [], pcts = [...new Set([s.settings.alertPct, 100])];
   const check = (key, label, spent, cap) => {

@@ -597,6 +597,20 @@ test('Market scan does not suggest a company already followed under another list
   assert.deepEqual(s.instruments.filter(i => i.auto).map(i => i.name), ['NVIDIA Corporation']);
 });
 
+test('Spending by category over a month or 12 months, and month by month', () => {
+  assert.deepEqual(B.monthsBack('2026-02', 3), ['2025-12', '2026-01', '2026-02']);
+  const s = base(), food = s.categories[1].id, fun = s.categories[5].id;
+  const spend = (date, cents, categoryId, kind = 'expense') => B.saveOp(s, { accountId: 'a', date, kind, cents, categoryId });
+  spend('2025-12-03', 5000, food); spend('2026-01-10', 12000, food); spend('2026-02-02', 3000, fun);
+  spend('2026-02-05', 1000, food, 'refund'); spend('2026-02-06', 700, null);
+  B.addTransfer(s, 'a', 'b', '2026-02-07', 50000); // not spending
+  const feb = B.spendingByCategory(s, '2026-02', '2026-02');
+  assert.deepEqual(feb.map(c => [c.name, c.spent]), [['Loisirs', 3000], ['Sans catégorie', 700]]); // food: refund only, nothing spent
+  const year = B.spendingByCategory(s, '2025-03', '2026-02');
+  assert.deepEqual(year.map(c => [c.name, c.spent, c.ops.length]), [['Alimentation', 16000, 3], ['Loisirs', 3000, 1], ['Sans catégorie', 700, 1]]);
+  assert.deepEqual(B.monthlySpending(s, '2026-02', 3).map(x => x.spent), [5000, 12000, 2700]);
+});
+
 test('demo data reproduces the spec figures', () => {
   const demo = B.validateState(B.demoState('2026-11-03')), st = B.monthStats(demo, M);
   assert.equal(B.valuation(demo, '2026-11-03').filter(l => l.stale).length, 1);
