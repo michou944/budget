@@ -3,3 +3,12 @@
 name = "prix-budget"
 main = "cloudflare-worker.js"
 compatibility_date = "2026-10-01"
+
+# storage for the Marketaux key, the phone's push address and the levels to watch
+[[kv_namespaces]]
+binding = "KV"
+id = "e6fcd4170ded41b3bd61f6dbb97e2773"
+
+# closed-app alerts: every 30 min, 7h-21h UTC, Monday to Friday
+[triggers]
+crons = ["*/30 7-20 * * 1-5"]

@@ -23,9 +23,9 @@ async function get(s, url, symbols, fetchFn, init) {
 // ---- the user's own price service (Cloudflare Worker relaying Yahoo Finance and OpenFIGI, see cloudflare-worker.js) ----
 
 const proxyOn = s => !!(s.settings.market.enabled && s.settings.market.proxyUrl);
-async function proxyGet(s, path, label, fetchFn) {
+async function proxyGet(s, path, label, fetchFn, init = {}) {
   const m = s.settings.market;
-  try { return await get(s, m.proxyUrl.replace(/\/+$/, '') + path, label, fetchFn, { headers: { 'x-key': m.proxyKey ?? '' } }); }
+  try { return await get(s, m.proxyUrl.replace(/\/+$/, '') + path, label, fetchFn, { ...init, headers: { ...init.headers, 'x-key': m.proxyKey ?? '' } }); }
   catch (e) { throw new Error(/HTTP 401/.test(e.message) ? 'Service de cours : mot de passe refusé' : /HTTP 404/.test(e.message) ? 'cotation introuvable' : `Service de cours : ${e.message}`); }
 }
 
@@ -58,6 +58,15 @@ async function proxyHistory(s, sym, fetchFn) {
   return c.currency === 'GBp' ? { currency: 'GBP', closes: c.closes.map(([d, p]) => [d, p / 100]) } : { currency: String(c.currency).toUpperCase(), closes: c.closes };
 }
 
+// POST to the user's own service (push alerts, key hand-over)
+export const workerCall = (s, path, body, fetchFn = fetch) => proxyGet(s, path, ['service'], fetchFn, { method: 'POST', body: JSON.stringify(body ?? {}), headers: { 'content-type': 'application/json' } });
+// Marketaux: with the key kept on the phone, or through the service once the key was handed over to it
+export const newsOn = m => !!(m.newsKey || (m.newsInWorker && m.proxyUrl));
+const mx = (s, call, label, fetchFn) => {
+  const m = s.settings.market;
+  return m.newsKey ? get(s, `${MX}/${call}&api_token=${enc(m.newsKey)}`, label, fetchFn) : proxyGet(s, `/mx/${call}`, label, fetchFn);
+};
+
 const needKey = (m, key) => {
   if (!m.enabled || !m[key]) throw new Error('Activez les données de marché et saisissez vos clés (onglet Bourse, « Clés et données envoyées »).');
 };
@@ -73,7 +82,7 @@ function byImportance(s, today) {
 const dailyCloses = j => Object.entries(j['Time Series (Daily)'] ?? {}).map(([d, v]) => [d, Number(v['4. close'])]);
 
 // « Tester » button: one cheap call that fails with HTTP 401 when the Marketaux key is wrong.
-export const checkNewsKey = (s, fetchFn = fetch) => get(s, `${MX}/news/all?language=en&limit=1&api_token=${enc(s.settings.market.newsKey)}`, ['test de la clé'], fetchFn);
+export const checkNewsKey = (s, fetchFn = fetch) => mx(s, 'news/all?language=en&limit=1', ['test de la clé'], fetchFn);
 
 // Finds titles by name or ticker (one Alpha Vantage call).
 export async function searchSymbols(s, query, fetchFn = fetch) {
@@ -132,11 +141,11 @@ export async function refreshMarket(s, today, fetchFn = fetch) {
 export async function refreshNews(s, today, fetchFn = fetch) {
   const m = s.settings.market, errors = [];
   if (!m.enabled) throw new Error('Données de marché désactivées');
-  if (!m.newsKey) return ['Clé Marketaux manquante : actualités non actualisées'];
+  if (!newsOn(m)) return ['Clé Marketaux manquante : actualités non actualisées'];
   for (const i of byImportance(s, today).filter(i => s.newsFetched[i.isin] !== today)) {
     const q = newsQuery(i);
     let j;
-    try { j = await get(s, `${MX}/news/all?search=${enc(`"${q}"`)}&language=fr,en&api_token=${enc(m.newsKey)}`, [q], fetchFn); }
+    try { j = await mx(s, `news/all?search=${enc(`"${q}"`)}&language=fr,en`, [q], fetchFn); }
     catch (e) { errors.push(`${q} : ${e.message}`); if (/HTTP (401|402|429)/.test(e.message)) break; continue; } // bad key or quota: stop
     for (const a of j.data ?? []) {
       const tones = (a.entities ?? []).map(e => e.sentiment_score).filter(Number.isFinite);
@@ -167,17 +176,17 @@ export function toAv(symbol) {
 export async function discover(s, today, fetchFn = fetch) {
   const m = s.settings.market, proxy = proxyOn(s);
   if (!proxy) needKey(m, 'avKey');
-  needKey(m, 'newsKey');
+  if (!newsOn(m)) needKey(m, 'newsKey');
   if (s.discovery?.date === today) return [];
   const week = new Date(Date.parse(today) - 7 * 864e5).toISOString().slice(0, 10);
   let trending, minDocs = 5;
   try {
-    trending = (await get(s, `${MX}/entity/trending/aggregation?countries=us,fr,de,nl&entity_types=equity&language=en,fr`
-      + `&published_after=${week}&min_doc_count=5&api_token=${enc(m.newsKey)}`, ['tendances du marché'], fetchFn)).data;
+    trending = (await mx(s, `entity/trending/aggregation?countries=us,fr,de,nl&entity_types=equity&language=en,fr`
+      + `&published_after=${week}&min_doc_count=5`, ['tendances du marché'], fetchFn)).data;
   } catch (e) {
     if (/HTTP 401/.test(e.message)) throw e;
     // shortcut: plan without the trending endpoint — rebuilt from the latest 15 market articles, a thinner signal
-    trending = await trendingFromNews(s, week, m.newsKey, fetchFn); minDocs = 1;
+    trending = await trendingFromNews(s, week, fetchFn); minDocs = 1;
   }
   const followed = new Set(s.instruments.filter(i => !i.auto).flatMap(i => [i.isin, i.symbol]));
   const picks = (trending ?? [])
@@ -208,7 +217,7 @@ export async function discover(s, today, fetchFn = fetch) {
   const ids = Object.keys(s.discovery.items);
   if (ids.length) {
     try {
-      const names = await get(s, `${MX}/entity/search?symbols=${enc(picks.filter(x => ids.includes(x.symbol)).map(x => x.symbol.replace(/\.[A-Z]+$/, '')).join(','))}&api_token=${enc(m.newsKey)}`, ['noms'], fetchFn);
+      const names = await mx(s, `entity/search?symbols=${enc(picks.filter(x => ids.includes(x.symbol)).map(x => x.symbol.replace(/\.[A-Z]+$/, '')).join(','))}`, ['noms'], fetchFn);
       for (const e of names.data ?? []) {
         const i = s.instruments.find(y => y.auto && y.symbol.replace(/\.[A-Z]+$/, '') === e.symbol?.replace(/\.[A-Z]+$/, ''));
         if (i && e.name) i.name = e.name;
@@ -222,11 +231,11 @@ export async function discover(s, today, fetchFn = fetch) {
   return errors;
 }
 
-async function trendingFromNews(s, week, key, fetchFn) {
+async function trendingFromNews(s, week, fetchFn) {
   const agg = {};
   for (const page of [1, 2, 3, 4, 5]) {
-    const j = await get(s, `${MX}/news/all?countries=us,fr,de,nl&filter_entities=true&must_have_entities=true&language=en,fr`
-      + `&published_after=${week}&page=${page}&api_token=${enc(key)}`, ['actualités du marché'], fetchFn);
+    const j = await mx(s, `news/all?countries=us,fr,de,nl&filter_entities=true&must_have_entities=true&language=en,fr`
+      + `&published_after=${week}&page=${page}`, ['actualités du marché'], fetchFn);
     for (const a of j.data ?? []) for (const e of a.entities ?? []) {
       if (e.type !== 'equity' || !e.symbol) continue;
       const x = (agg[e.symbol] ??= { key: e.symbol, total_documents: 0, sum: 0 });

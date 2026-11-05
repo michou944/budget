@@ -1,5 +1,5 @@
 import * as B from './budget.js';
-import { refreshMarket, refreshNews, searchSymbols, discover, checkNewsKey } from './market.js';
+import { refreshMarket, refreshNews, searchSymbols, discover, checkNewsKey, workerCall, newsOn } from './market.js';
 
 const KEY = 'budget.v1';
 const app = document.getElementById('app');
@@ -400,7 +400,7 @@ const views = {
         + (missing ? `<div class="warn">${missing} ligne(s) sans cours, exclue(s) du total.</div>` : '')
         + empty('Touchez un titre pour voir pourquoi : Renforcer, Conserver, Alléger ou Vendre.'))
       + card('Idées d’achat', (sug.filter(x => !x.held).sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || b.score - a.score).map(titleRow).join('')
-          || empty(ready && mk.newsKey ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (« Réglages bourse » plus bas).'))
+          || empty(ready && newsOn(mk) ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (« Réglages bourse » plus bas).'))
         + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
         + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
       + (view.search?.forIsin ? '' : searchCard())
@@ -454,16 +454,20 @@ const views = {
       + fold('keys', 'Réglages bourse (service de cours, clés)', `<form data-form="market"><label class="chk"><input type="checkbox" name="enabled"${mk.enabled ? ' checked' : ''}> Activer les données en ligne</label>
         <label>Adresse de votre service de cours<input name="proxyUrl" type="url" placeholder="https://prix-budget.xxx.workers.dev" value="${esc(mk.proxyUrl)}" autocomplete="off"></label>
         <label>Mot de passe du service<input type="password" name="proxyKey" value="${esc(mk.proxyKey)}" autocomplete="off"></label>
-        <label>Clé Marketaux (actualités et idées)<input type="password" name="newsKey" value="${esc(mk.newsKey)}" autocomplete="off"></label>
+        <label>Clé Marketaux (actualités et idées)<input type="password" name="newsKey" value="${esc(mk.newsKey)}" autocomplete="off"${mk.newsInWorker ? ' placeholder="Rangée dans votre service ✓"' : ''}></label>
         <details><summary class="muted">Sans service de cours</summary><label>Clé Alpha Vantage (25 cours par jour)<input type="password" name="avKey" value="${esc(mk.avKey)}" autocomplete="off"></label></details>
         <div class="grid2"><button class="ghost">Enregistrer</button>${btn('testKeys', '', 'Tester', 'ghost')}</div></form>
+        ${mk.proxyUrl && mk.newsKey ? `<div style="margin-top:10px">${btn('moveNewsKey', '', '🔒 Ranger la clé Marketaux dans mon service', 'ghost')}${empty('Elle ne sera plus stockée sur le téléphone.')}</div>` : ''}
+        ${mk.proxyUrl ? `<div style="margin-top:12px"><b>🔔 Alertes même appli fermée</b>${mk.push
+          ? `<div class="muted">Actives : votre service vérifie vos titres toutes les 30 min en semaine (seuil de perte, stop suiveur, forte hausse, ±6 % sur une séance).</div><div class="grid2">${btn('pushTest', '', 'Envoyer un essai', 'ghost')}${btn('pushOff', '', 'Désactiver', 'ghost')}</div>`
+          : `<div class="muted">Votre service reçoit seulement les noms des titres et les cours à surveiller : ni quantités ni montants.</div>${btn('pushOn', '', 'Activer', 'ghost')}`}</div>` : ''}
         <details style="margin-top:8px"><summary><b>Créer le service de cours (5 min, gratuit)</b></summary><div class="muted">
           1. Créez un compte sur <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener noreferrer">dash.cloudflare.com</a>.<br>
           2. « Workers et Pages » → « Créer » → « Hello World » → donnez-lui un nom (ex. prix-budget) → « Déployer ».<br>
           3. « Modifier le code » : remplacez tout par le contenu de <a href="cloudflare-worker.js" target="_blank">cloudflare-worker.js</a> → « Déployer ».<br>
           4. « Paramètres » → « Variables et secrets » → « Ajouter » : type Secret, nom <b>KEY</b>, valeur = un mot de passe de votre choix.<br>
           5. Ici : collez l’adresse du service (…workers.dev) et ce mot de passe, puis « Enregistrer » et « Tester ».</div></details>
-        ${empty('Envoyés : à votre service, les ISIN et symboles suivis ; à Marketaux, votre clé et les noms suivis. Jamais : quantités, montants, comptes, opérations.')}
+        ${empty('Envoyés : à votre service, les ISIN et symboles suivis (et, si les alertes sont activées, les cours seuils de vos titres et l’adresse de notification du téléphone) ; à Marketaux, votre clé et les noms suivis. Jamais : quantités, montants, comptes, opérations.')}
         ${S.requestLog.slice(0, 10).map(r => `<div class="muted">${r.at.slice(0, 16).replace('T', ' ')} · ${esc(r.host)} · ${esc(r.symbols.join(', '))}</div>`).join('')}`, !ready)
       + (S.instruments.length ? fold('manual', 'Saisir un cours à la main', `<form data-form="quote"><select name="isin">${instOpts(S.instruments)}</select>
         <div class="grid2"><input name="price" inputmode="decimal" placeholder="Cours (devise de cotation)" required><input type="date" name="date" value="${t}" required></div><button class="ghost">Enregistrer le cours</button></form>`) : '');
@@ -568,9 +572,13 @@ const actions = {
   closeInst: () => { view.inst = null; },
   refreshAll: async () => {
     const t = today(), errs = [...await refreshMarket(S, t)];
-    if (S.settings.market.newsKey) {
+    if (newsOn(S.settings.market)) {
       errs.push(...await refreshNews(S, t));
       try { errs.push(...await discover(S, t)); } catch (e) { errs.push(`Recherche d’idées : ${e.message}`); }
+    }
+    const m = S.settings.market, watch = JSON.stringify(B.watchList(S, t));
+    if (m.push && watch !== m.pushSent) { // the closed-app alerts follow the portfolio
+      try { await workerCall(S, '/push/watch', { watch: JSON.parse(watch) }); m.pushSent = watch; } catch (e) { errs.push(`Alertes appli fermée : ${e.message}`); }
     }
     S.lastRefresh = { at: new Date().toISOString(), errors: [...new Set(errs.map(plain))] }; // shown on the Bourse screen, no pop-up
   },
@@ -578,11 +586,33 @@ const actions = {
     const m = S.settings.market, out = [];
     if (!m.enabled) throw new Error('Cochez d’abord « Activer les données en ligne », puis Enregistrer.');
     if (m.proxyUrl) try { await searchSymbols(S, 'TotalEnergies'); out.push('Service de cours : OK ✓'); } catch (e) { out.push(plain(e.message)); }
-    if (m.newsKey) try { await checkNewsKey(S); out.push('Clé Marketaux : OK ✓'); } catch (e) { out.push(plain(e.message)); }
+    if (newsOn(m)) try { await checkNewsKey(S); out.push('Clé Marketaux : OK ✓'); } catch (e) { out.push(plain(e.message)); }
     alert(out.join('\n') || 'Renseignez l’adresse du service et la clé Marketaux, puis Enregistrer.');
   },
   findSymbol: async isin => { const i = S.instruments.find(x => x.isin === isin); view.search = { q: i.name, forIsin: isin, results: await searchSymbols(S, i.name) }; scrollTo(0, 0); },
   cancelSearch: () => { view.search = null; },
+  moveNewsKey: async () => {
+    const m = S.settings.market;
+    await workerCall(S, '/config', { newsKey: m.newsKey });
+    m.newsInWorker = true; m.newsKey = '';
+    try { await checkNewsKey(S); alert('Clé rangée dans votre service, et testée : OK ✓'); } catch (e) { alert(`Clé rangée, mais le test échoue : ${plain(e.message)}`); }
+  },
+  pushOn: async () => {
+    if (!('PushManager' in window)) throw new Error('Ce navigateur ne sait pas recevoir d’alertes appli fermée. Installez l’appli sur l’écran d’accueil (Chrome).');
+    if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications refusées : autorisez-les dans les réglages du téléphone.');
+    const { publicKey } = await workerCall(S, '/push/key'), reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: publicKey });
+    const watch = B.watchList(S, today()), m = S.settings.market;
+    await workerCall(S, '/push/watch', { subscription: sub.toJSON(), watch });
+    Object.assign(m, { push: true, pushSent: JSON.stringify(watch) });
+    alert(`Alertes activées : ${watch.length} titre(s) surveillé(s). Touchez « Envoyer un essai » pour vérifier.`);
+  },
+  pushTest: async () => { await workerCall(S, '/push/test'); },
+  pushOff: async () => {
+    await (await (await navigator.serviceWorker.ready).pushManager.getSubscription())?.unsubscribe();
+    await workerCall(S, '/push/off');
+    Object.assign(S.settings.market, { push: false, pushSent: null });
+  },
   notifOn: async () => {
     if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications refusées : autorisez-les dans les réglages du téléphone.');
     S.settings.notify = true; // the advice already shown on screen counts as known: only changes are announced from now on
@@ -659,7 +689,7 @@ const forms = {
     const proxyUrl = f.proxyUrl.trim();
     if (proxyUrl && !/^https:\/\//.test(proxyUrl)) throw new Error('L’adresse du service doit commencer par https://');
     if (proxyUrl !== S.settings.market.proxyUrl) for (const i of S.instruments) delete i.ysym; // listings are looked up again by the new service
-    S.settings.market = { enabled: f.enabled === 'on', proxyUrl, proxyKey: f.proxyKey.trim(), avKey: f.avKey.trim(), newsKey: f.newsKey.trim() };
+    Object.assign(S.settings.market, { enabled: f.enabled === 'on', proxyUrl, proxyKey: f.proxyKey.trim(), avKey: f.avKey.trim(), newsKey: f.newsKey.trim() });
   },
   holding: f => {
     const qty = decimal(f.qty), cost = parseEur(f.cost), q = S.quotes[f.isin], i = S.instruments.find(x => x.isin === f.isin);

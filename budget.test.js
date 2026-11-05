@@ -706,3 +706,15 @@ test('Decision journal: price and verdict kept at the time, reviewed against the
   B.deleteDecision(s, a.id); assert.equal(s.journal.length, 1);
   B.deleteInstrument(s, ETF); assert.equal(s.journal.length, 0);
 });
+
+test('Closed-app watch list: max-loss level per share in the listing currency, nothing for titles not held', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000); B.setQuote(s, ETF, 100, T);
+  s.instruments.find(i => i.isin === ETF).ysym = 'SWDA.L';
+  s.instruments.find(i => i.isin === AAPL).ysym = 'AAPL';
+  s.settings.profile.risk = 'equilibre'; s.settings.profile.horizon = 10;
+  const w = B.watchList(s, T);
+  assert.equal(w.length, 1); assert.equal(w[0].s, 'SWDA.L'); assert.equal(w[0].move, 6);
+  assert.deepEqual(w[0].rules.map(r => r.below), [80]); // 100 € per share, 20 % max loss
+  assert.ok(!JSON.stringify(w).includes('100000'));
+});

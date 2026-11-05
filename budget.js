@@ -315,6 +315,28 @@ export function trend(s, isin) {
     high: Math.max(...closes), asOf: h.at(-1)[0] };
 }
 
+// Levels watched by the Worker while the app is closed, for held titles with a Yahoo listing: the profile's maximum loss,
+// the trailing stop (horizon under 5 years) and, in active style, the take-profit and buy-back levels; plus any ±6 % day.
+// Prices in the listing's currency; no quantity or amount leaves the phone.
+export function watchList(s, today) {
+  const p = s.settings.profile, risk = RISK[p.risk] ?? RISK.equilibre, lines = valuation(s, today), r2 = x => Math.round(x * 100) / 100, out = [];
+  for (const i of s.instruments.filter(i => i.ysym)) {
+    const mine = lines.filter(l => l.isin === i.isin && l.cost > 0);
+    if (!mine.length) continue;
+    const qty = mine.reduce((a, l) => a + l.qty, 0), cost = mine.reduce((a, l) => a + l.cost, 0);
+    const rate = i.currency === 'EUR' ? 1 : s.fx[i.currency]?.rate, tr = trend(s, i.isin), rules = [];
+    if (rate) rules.push({ below: r2((cost / qty / 100) * rate * (1 - risk.maxLoss / 100)), msg: `perte de ${risk.maxLoss} % atteinte, votre limite : à alléger ?` });
+    const hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
+    if (p.horizon < 5 && hi) rules.push({ below: r2(hi * (1 - risk.trail / 100)), msg: `${risk.trail} % sous son plus haut (stop suiveur) : à alléger ?` });
+    if (p.style === 'actif' && tr) {
+      rules.push({ above: r2(tr.sma50 * 1.12), msg: 'forte hausse : prendre une partie des bénéfices ?' });
+      if (tr.first < tr.sma50) rules.push({ below: r2(tr.sma50 * 0.93), msg: 'repli dans une tendance qui monte : occasion de racheter ?' });
+    }
+    out.push({ s: i.ysym, n: i.name, rules, move: 6 });
+  }
+  return out;
+}
+
 const checkTrade = (s, isin, qty) => {
   if (!s.instruments.some(i => i.isin === isin)) throw new Error('Instrument inconnu');
   if (!(qty > 0)) throw new Error('Quantité invalide');
