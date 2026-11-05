@@ -15,7 +15,7 @@ export function emptyState() {
     categories: ['Logement', 'Alimentation', 'Santé', 'Mobilité et auto', 'Impôts', 'Loisirs', 'Abonnements', 'Divers']
       .map(name => ({ id: uid(), name, cap: 0 })),
     settings: { reserve: 0, globalCap: 0, alertPct: 80, lowSpendable: 10000, notify: false, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
-    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {}, discovery: { date: null, items: {} }, notified: { verdicts: {}, sent: [] },
+    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {}, discovery: { date: null, items: {} }, notified: { verdicts: {}, sent: [] }, journal: [],
   };
 }
 
@@ -29,7 +29,7 @@ export function validateState(x) {
   }
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
     x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {}; x.discovery ??= { date: null, items: {} };
-    x.settings.lowSpendable ??= 10000; x.notified ??= { verdicts: {}, sent: [] };
+    x.settings.lowSpendable ??= 10000; x.notified ??= { verdicts: {}, sent: [] }; x.journal ??= [];
     // the hand-picked comparison ETFs were withdrawn (ideas now come from the market scan): drop those never bought
     const withdrawn = ['Amundi MSCI World (CW8)', 'Amundi PEA S&P 500 (PSP5)', 'Amundi Stoxx Europe 600 (MEUD)', 'Amundi PEA MSCI Emerging Markets (PAEEM)'];
     x.instruments = x.instruments.filter(i => !(i.type === 'ETF' && withdrawn.includes(i.name) && !x.ops.some(o => o.isin === i.isin)
@@ -342,6 +342,7 @@ export function deleteInstrument(s, isin) {
   for (const sn of Object.values(s.snapshots)) sn.lines = sn.lines.filter(l => l.isin !== isin);
   s.instruments = s.instruments.filter(i => i.isin !== isin);
   for (const k of ['quotes', 'history', 'peaks', 'newsFetched']) delete s[k][isin];
+  s.journal = (s.journal ?? []).filter(d => d.isin !== isin);
   delete s.settings.profile.targets[isin];
   s.news = s.news.filter(n => n.isin !== isin);
   if (s.discovery?.items) delete s.discovery.items[isin];
@@ -375,6 +376,22 @@ function book(s) {
 export const positions = s => book(s).filter(p => p.qty > 0).map(({ accountId, isin, qty, cost }) => ({ accountId, isin, qty, cost }));
 export const realizedGain = (s, isin) => book(s).filter(p => p.isin === isin).reduce((a, p) => a + p.realized, 0);
 
+// Decision journal: what I decided, why, at what price and what the tool said; reviewed later against the current price.
+export const DECISIONS = { achat: '🟢 J’achète', vente: '🔴 Je vends', attente: '⏸️ J’attends', passe: '🙅 Je laisse passer' };
+export function addDecision(s, today, isin, action, note = '', verdict = null) {
+  if (!DECISIONS[action]) throw new Error('Décision inconnue');
+  const q = s.quotes[isin];
+  const d = { id: uid(), date: today, isin, action, note: note.trim(), price: q?.price ?? null, verdict };
+  (s.journal ??= []).push(d);
+  return d;
+}
+export const deleteDecision = (s, id) => { s.journal = s.journal.filter(d => d.id !== id); };
+// change since the decision, and whether it went the way the decision bet on (buying wanted a rise, selling or skipping a fall)
+export const journalReview = s => (s.journal ?? []).map(d => {
+  const now = s.quotes[d.isin]?.price, change = d.price && now ? ((now - d.price) * 100) / d.price : null;
+  const right = change == null || d.action === 'attente' || Math.abs(change) < 2 ? null : (d.action === 'achat') === (change > 0);
+  return { ...d, now: now ?? null, change, right };
+}).sort((a, b) => b.date.localeCompare(a.date));
 export function addSplit(s, accountId, isin, date, ratio) {
   if (!(ratio > 0) || ratio === 1) throw new Error('Ratio invalide : pour une division « 10 pour 1 », indiquez 10');
   if (!positions(s).some(p => p.accountId === accountId && p.isin === isin)) throw new Error('Aucune position sur ce compte');

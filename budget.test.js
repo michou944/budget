@@ -692,3 +692,17 @@ test('demo data reproduces the spec figures', () => {
   assert.equal(B.valuation(demo, '2026-11-03').filter(l => l.stale).length, 1);
   assert.equal(st.toDate, 130000); assert.equal(st.forecast, 80000); assert.equal(st.spendable, 40000);
 });
+
+test('Decision journal: price and verdict kept at the time, reviewed against the current price', () => {
+  const s = withInstruments();
+  B.setQuote(s, ETF, 100, T);
+  B.addDecision(s, T, ETF, 'achat', ' rebond attendu ', 'Renforcer');
+  B.addDecision(s, T, ETF, 'passe');
+  assert.throws(() => B.addDecision(s, T, ETF, 'bof'));
+  B.setQuote(s, ETF, 110, T);
+  const [a, b] = B.journalReview(s).sort((x, y) => (x.action < y.action ? -1 : 1));
+  assert.equal(a.price, 100); assert.equal(a.note, 'rebond attendu'); assert.equal(a.verdict, 'Renforcer');
+  assert.equal(Math.round(a.change), 10); assert.equal(a.right, true); assert.equal(b.right, false);
+  B.deleteDecision(s, a.id); assert.equal(s.journal.length, 1);
+  B.deleteInstrument(s, ETF); assert.equal(s.journal.length, 0);
+});

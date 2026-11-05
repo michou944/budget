@@ -82,6 +82,11 @@ const onboarding = () => card('Bienvenue 👋', empty('Aucun compte pour l’ins
 // Bottom panel to add or change an entry: big amount, categories and accounts as icons to tap, no drop-down list.
 // an account that is neither current nor savings and has no type yet is a brokerage account (created before types existed)
 const accKind = a => (a.type === 'PEA' ? 'pea' : a.type === 'CTO' ? 'cto' : a.savings ? 'epargne' : a.liquid ? 'courant' : 'cto');
+// one journal entry: decision, price then → now, and whether it went the way the decision bet on
+const decisionRow = (d, withName) => `<div class="op"><div class="l"><b>${B.DECISIONS[d.action]}</b>${withName ? ` · ${esc(S.instruments.find(i => i.isin === d.isin)?.name ?? d.isin)}` : ''}`
+  + `<div class="muted">${shortDate(d.date)}${d.verdict ? ` · l’outil disait ${esc(d.verdict)}` : ''}${d.price ? ` · cours ${num(d.price)}` : ''}${d.note ? ` · « ${esc(d.note)} »` : ''}</div></div>`
+  + `<div style="text-align:right">${d.change == null ? '' : `<span class="${d.change < 0 ? 'neg' : 'pos'}">${d.change > 0 ? '+' : ''}${d.change.toFixed(1).replace('.', ',')} %</span>`}`
+  + `<div class="muted">${d.right == null ? '' : d.right ? '✅ bien vu' : '❌ raté'}</div>${btn('delDecision', d.id, '✕')}</div></div>`;
 const chip = (name, value, label, on) => `<label><input type="radio" name="${name}" value="${esc(value)}"${on ? ' checked' : ''}><span>${label}</span></label>`;
 const catChips = sel => `<div class="cats">${[...S.categories.map(c => [c.id, c.name]), ['', 'Aucune']].map(([id, n]) => `<label><input type="radio" name="categoryId" value="${esc(id)}"${(sel ?? '') === id ? ' checked' : ''}><span><b>${id ? catIcon(n) : '·'}</b>${esc(n)}</span></label>`).join('')}</div>`;
 const cancelBtn = '<button type="button" class="ghost" data-act="closeSheet">Annuler</button>';
@@ -329,6 +334,11 @@ const views = {
             .map(([l, v]) => `<div class="row"><span>${l}</span><span>${v}</span></div>`).join('')
             + `<div class="day">Si ensuite le cours varie de…</div>` + sim.r.at.map(x => `<div class="row"><span>${x.change > 0 ? '+' : ''}${x.change} %</span>${money(x.gain)}</div>`).join('')
             + empty('Gain ou perte sur toute la ligne après cet achat. Simulation seulement : rien n’est enregistré.') + '</div>' : '') + '</details>')(view.sim?.isin === isin ? view.sim : null))
+        + `<details style="margin-top:10px"${S.journal?.some(d => d.isin === isin) ? ' open' : ''}><summary><b>📓 Ma décision</b></summary><form data-form="decision"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="verdict" value="${esc(x?.action ?? '')}">
+          <div class="chips">${Object.entries(B.DECISIONS).map(([k, l], n) => chip('action', k, l, !n)).join('')}</div>
+          <input name="note" placeholder="Pourquoi ? (facultatif)" maxlength="200"><button class="ghost">Noter</button>
+          ${empty('Le cours et l’avis de l’outil sont gardés avec la date : vous verrez plus tard si c’était bien vu.')}</form>`
+          + B.journalReview(S).filter(d => d.isin === isin).map(d => decisionRow(d)).join('') + '</details>'
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
@@ -422,6 +432,9 @@ const views = {
       + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
         + (lines.some(l => l.inst.currency === 'USD') ? `<div class="row"><span>Dollar −10 % (titres en $)</span>${money(-B.stressLoss(S, t, 0, 10))}</div>` : '')
         + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. L’encaisse n’est pas comptée.')) : '')
+      + (S.journal?.length ? fold('journal', `📓 Mon journal · ${S.journal.length}`, ((r, ok) => (ok.length ? empty(`${ok.filter(d => d.right).length} décision(s) bien vue(s) sur ${ok.length} jugeable(s).`) : '')
+        + r.map(d => decisionRow(d, true)).join(''))(B.journalReview(S), B.journalReview(S).filter(d => d.right != null))
+        + empty('« Bien vu » : le cours a monté de plus de 2 % après un achat, ou baissé après une vente ou un titre laissé passer. Le cours est dans la devise du titre.')) : '')
       + fold('profile', 'Mon profil et mes cibles', `<form data-form="profile">
         <div class="muted">Ma façon d’investir</div>
         <div class="chips">${chip('style', 'long', '🌳 Long terme : je garde', pf.style !== 'actif')}${chip('style', 'actif', '🔄 Actif : je vends les fortes hausses, je rachète les baisses', pf.style === 'actif')}</div>
@@ -585,6 +598,7 @@ const actions = {
     else { view.inst = B.saveInstrument(S, { symbol: r.symbol, name: r.name, currency, type: r.type, place: r.region }); S.instruments.find(i => i.isin === view.inst).ysym = ysym; }
     view.search = null;
   },
+  delDecision: id => B.deleteDecision(S, id),
   delInst: isin => {
     const name = S.instruments.find(i => i.isin === isin)?.name;
     const held = S.ops.some(o => o.isin === isin) || Object.values(S.snapshots).some(sn => sn.lines.some(l => l.isin === isin));
@@ -657,6 +671,7 @@ const forms = {
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
+  decision: f => B.addDecision(S, today(), f.isin, f.action, f.note, f.verdict || null),
   simulate: f => { view.sim = { isin: f.isin, qty: f.qty, price: f.price, r: B.simulate(S, today(), f.isin, decimal(f.qty), decimal(f.price), S.settings.profile.fee) }; },
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {

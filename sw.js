@@ -1,6 +1,6 @@
 // Offline cache for the app's own files. Market data requests (other origins) are never cached:
 // an old quote must show with its own date, not be served silently as if it were fresh.
-const CACHE = 'budget-v19';
+const CACHE = 'budget-v20';
 const FILES = ['./', 'index.html', 'ui.js', 'budget.js', 'market.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))));
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))));
