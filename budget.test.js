@@ -676,6 +676,17 @@ test('Indicators from one year of prices, and the conclusion frame (missing data
   assert.equal(B.indicators(s, AAPL), null);
 });
 
+test('Test B — simulator: 5 shares at 100 then 2 at 150 → 7 shares, average cost 114,2857; weight and scenarios', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 5, 50000); B.setQuote(s, ETF, 150, T);
+  const r = B.simulate(s, T, ETF, 2, 150);
+  assert.equal(r.newQty, 7); assert.equal(Math.round(r.pru * 10000) / 10000, 11428.5714); // cents per share: 114,2857 €
+  assert.equal(r.weightBefore, 100); assert.equal(r.at.find(x => x.change === -20).gain, Math.round(7 * 120 * 100) - 80000);
+  assert.equal(B.stressLoss(s, T, 20), 15000); // 750 € of value, −20 %
+  B.addHolding(s, 'b', AAPL, '2025-01-01', 1, 20000); B.setQuote(s, AAPL, 220, T); s.fx.USD = { rate: 1.1, asOf: T };
+  assert.equal(B.stressLoss(s, T, 0, 10), 2000); // only the dollar line moves: 200 € × 10 %
+});
+
 test('demo data reproduces the spec figures', () => {
   const demo = B.validateState(B.demoState('2026-11-03')), st = B.monthStats(demo, M);
   assert.equal(B.valuation(demo, '2026-11-03').filter(l => l.stale).length, 1);

@@ -274,6 +274,25 @@ export function setHistory(s, isin, points, source, today) {
   return true;
 }
 
+// Reinforcement scenario: buying `qty` at `price` (listing currency) plus fees → new average cost, new weight, and the
+// line's gain or loss if the price then moves. Nothing is recorded.
+export function simulate(s, today, isin, qty, price, feeCents = 0) {
+  const lines = valuation(s, today), mine = lines.filter(l => l.isin === isin), inst = s.instruments.find(i => i.isin === isin);
+  const rate = inst.currency === 'EUR' ? 1 : s.fx[inst.currency]?.rate;
+  if (!rate) throw new Error(`Taux de change ${inst.currency} manquant : actualisez d’abord.`);
+  if (!(qty > 0) || !(price > 0)) throw new Error('Quantité et prix doivent être positifs');
+  const held = mine.reduce((a, l) => a + l.qty, 0), cost = mine.reduce((a, l) => a + l.cost, 0), now = mine.reduce((a, l) => a + (l.value ?? 0), 0);
+  const total = lines.reduce((a, l) => a + (l.value ?? 0), 0), add = Math.round((qty * price * 100) / rate) + feeCents;
+  const newQty = held + qty, newCost = cost + add;
+  return { held, newQty, add, newCost, pru: newCost / newQty, weightBefore: total ? (now * 100) / total : 0, weightAfter: ((now + add) * 100) / (total + add),
+    at: [-30, -20, -10, 10, 20].map(change => ({ change, gain: Math.round((newQty * price * (1 + change / 100) * 100) / rate) - newCost })) };
+}
+
+// Stress test: what the valued lines would lose if every price fell `drop` % and the dollar `usd` % against the euro.
+// shortcut: same fall for every line (no sector or correlation model), a first look rather than a risk model
+export const stressLoss = (s, today, drop, usd = 0) => valuation(s, today).filter(l => l.value != null)
+  .reduce((a, l) => a + Math.round(l.value * (1 - (1 - drop / 100) * (l.inst.currency === 'USD' ? 1 - usd / 100 : 1))), 0);
+
 // Technical indicators from the daily closes (up to one year); null when there are too few prices.
 export function indicators(s, isin) {
   const c = (s.history[isin] ?? []).map(x => x[1]);

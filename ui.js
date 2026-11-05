@@ -321,6 +321,14 @@ const views = {
             [`Volatilité : ${Math.round(ind.vol)} % par an`, 'Amplitude habituelle des variations. Sous 20 % : calme ; au-dessus de 40 % : très agité.'],
             [`Baisse depuis le plus haut : ${ind.drawdown.toFixed(1).replace('.', ',')} %`, `Plus haut ${ind.hi.toFixed(2).replace('.', ',')} · plus bas ${ind.lo.toFixed(2).replace('.', ',')} sur ${ind.days >= 250 ? '52 semaines' : `${ind.days} séances`}.`]]
             .map(([v, e]) => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${v}</b><div class="muted">${e}</div></div>`).join('') + '</details>'))(B.indicators(S, isin)))
+        + ((sim => `<details style="margin-top:10px"${sim ? ' open' : ''}><summary><b>🧮 Simuler un achat</b></summary><form data-form="simulate"><input type="hidden" name="isin" value="${esc(isin)}">
+          <div class="grid2"><label>Nombre de parts<input name="qty" inputmode="decimal" value="${esc(sim?.qty ?? '1')}"></label><label>Prix (${i.currency})<input name="price" inputmode="decimal" value="${esc(sim?.price ?? (q ? String(q.price).replace('.', ',') : ''))}"></label></div>
+          <button class="ghost">Calculer</button></form>`
+          + (sim ? '<div style="margin-top:10px">' + [['Parts après l’achat', `${num(sim.r.held)} → <b>${num(sim.r.newQty)}</b>`], ['Coût de l’achat (frais estimés inclus)', eur(sim.r.add)],
+            ['Nouveau prix de revient par part', `<b>${eur(Math.round(sim.r.pru))}</b>`], ['Poids dans le portefeuille', `${sim.r.weightBefore.toFixed(1).replace('.', ',')} % → <b>${sim.r.weightAfter.toFixed(1).replace('.', ',')} %</b>`]]
+            .map(([l, v]) => `<div class="row"><span>${l}</span><span>${v}</span></div>`).join('')
+            + `<div class="day">Si ensuite le cours varie de…</div>` + sim.r.at.map(x => `<div class="row"><span>${x.change > 0 ? '+' : ''}${x.change} %</span>${money(x.gain)}</div>`).join('')
+            + empty('Gain ou perte sur toute la ligne après cet achat. Simulation seulement : rien n’est enregistré.') + '</div>' : '') + '</details>')(view.sim?.isin === isin ? view.sim : null))
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
@@ -411,6 +419,9 @@ const views = {
         return `<h2 style="margin-top:10px">${esc(a.name)}</h2>` + row('Encaisse', B.balance(S, a))
           + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
       }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
+      + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
+        + (lines.some(l => l.inst.currency === 'USD') ? `<div class="row"><span>Dollar −10 % (titres en $)</span>${money(-B.stressLoss(S, t, 0, 10))}</div>` : '')
+        + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. L’encaisse n’est pas comptée.')) : '')
       + fold('profile', 'Mon profil et mes cibles', `<form data-form="profile">
         <div class="muted">Ma façon d’investir</div>
         <div class="chips">${chip('style', 'long', '🌳 Long terme : je garde', pf.style !== 'actif')}${chip('style', 'actif', '🔄 Actif : je vends les fortes hausses, je rachète les baisses', pf.style === 'actif')}</div>
@@ -646,6 +657,7 @@ const forms = {
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
+  simulate: f => { view.sim = { isin: f.isin, qty: f.qty, price: f.price, r: B.simulate(S, today(), f.isin, decimal(f.qty), decimal(f.price), S.settings.profile.fee) }; },
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {
     const reserve = parseEur(f.reserve), globalCap = parseEur(f.globalCap), alertPct = Number(f.alertPct), lowSpendable = parseEur(f.lowSpendable);
