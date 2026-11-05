@@ -14,8 +14,14 @@ export default {
     const cors = { 'Access-Control-Allow-Origin': ORIGIN, 'Access-Control-Allow-Headers': 'x-key', 'Content-Type': 'application/json' };
     const reply = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: cors });
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
-    if (!env.KEY || req.headers.get('x-key') !== env.KEY) return reply({ error: 'mot de passe refusé' }, 401);
     const u = new URL(req.url), q = name => u.searchParams.get(name) ?? '';
+    if (u.pathname === '/sante') { // public health check: fixed public symbol, only reports whether the sources answer
+      const [y, f] = await Promise.all([
+        fetch('https://query2.finance.yahoo.com/v8/finance/chart/TTE.PA?range=5d&interval=1d', { headers: UA }).then(r => r.status, () => 0),
+        fetch('https://api.openfigi.com/v3/mapping', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '[{"idType":"ID_ISIN","idValue":"FR0000120271"}]' }).then(r => r.status, () => 0)]);
+      return reply({ yahoo: y === 200 ? 'OK' : y, openfigi: f === 200 ? 'OK' : f, motDePasseConfigure: !!env.KEY });
+    }
+    if (!env.KEY || req.headers.get('x-key') !== env.KEY) return reply({ error: 'mot de passe refusé' }, 401);
     try {
       if (u.pathname === '/search') { // name, ticker or (non-US) ISIN → listings
         const r = await fetch(`https://query2.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q('q'))}&quotesCount=8&newsCount=0`, { headers: UA });

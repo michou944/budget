@@ -1,0 +1,5 @@
+# Cloudflare deploy settings for the personal price service (cloudflare-worker.js). No secret here:
+# the service password is stored by Cloudflare as the secret KEY (npx wrangler secret put KEY).
+name = "prix-budget"
+main = "cloudflare-worker.js"
+compatibility_date = "2026-10-01"
