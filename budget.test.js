@@ -312,7 +312,7 @@ test('Verdict: the under-target title gets the envelope purchase, fees included,
   B.addEnvelope(s, M, 120000);
   assert.equal(verdict(s, ETF).action, 'Alléger'); // 100 % held vs 60 % target
   let v = verdict(s, CW8);
-  assert.equal(v.action, 'Acheter'); assert.equal(v.buy.qty, 2); assert.equal(v.buy.total, 2 * 56120 + 100);
+  assert.equal(v.action, 'Acheter'); assert.equal(v.buy.qty, 2); assert.equal(v.buy.total, 2 * 56120 + 195); // Fortuneo's estimated fee
   s.accounts[1].opening = 60000; // cash now lower than the envelope
   v = verdict(s, CW8);
   assert.equal(v.buy.qty, 1); assert.ok(v.buy.total <= 60000); assert.match(v.reasons.at(-1).text, /encaisse/);
@@ -609,6 +609,33 @@ test('Spending by category over a month or 12 months, and month by month', () =>
   const year = B.spendingByCategory(s, '2025-03', '2026-02');
   assert.deepEqual(year.map(c => [c.name, c.spent, c.ops.length]), [['Alimentation', 16000, 3], ['Loisirs', 3000, 1], ['Sans catégorie', 700, 1]]);
   assert.deepEqual(B.monthlySpending(s, '2026-02', 3).map(x => x.spent), [5000, 12000, 2700]);
+});
+
+test('Broker fees left empty are estimated from the broker name', () => {
+  const s = withInstruments();
+  B.saveInstrument(s, { isin: CW8, name: 'CW8', symbol: 'CW8.PAR', currency: 'EUR' });
+  s.accounts.push({ id: 'tr', name: 'TR', institution: 'Trade Republic', opening: 0, liquid: false, savings: false, type: 'CTO' });
+  B.setQuote(s, CW8, 561.2, T); B.addEnvelope(s, M, 120000); s.settings.profile.targets = { [CW8]: 100 };
+  s.settings.profile.fee = 500; // the profile's own guess is not used for a known broker
+  const v = B.suggestions(s, T).find(x => x.isin === CW8);
+  assert.equal(v.buy.accountId, 'tr'); assert.equal(v.buy.fees, 100);
+  assert.equal(B.brokerFees('Interactive Brokers').fixed, 300); assert.equal(B.brokerFees('Banque BCP'), null);
+});
+
+test('Active style: take part of the profit after a strong rise, buy back on a dip inside a rising trend', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 80000); // bought 80 € a share
+  s.settings.profile.style = 'actif';
+  B.setHistory(s, ETF, [...closes(100, 0.1).slice(0, 99), [T, 115]], 'Alpha Vantage', T); // jumps 115 % of its average
+  let v = verdict(s, ETF);
+  assert.equal(v.action, 'Alléger'); assert.ok(v.reasons.some(r => /prendre une partie des bénéfices/.test(r.text) && /imposé à 30 %/.test(r.text)));
+  s.settings.profile.style = 'long';
+  assert.equal(verdict(s, ETF).action, 'Conserver'); // long term: no take-profit rule
+  s.settings.profile.style = 'actif';
+  B.setHistory(s, ETF, [...closes(100, 0.1).slice(0, 99), [T, 88]], 'Alpha Vantage', T); // dip ~10 % under its average, trend up since start
+  v = verdict(s, ETF);
+  assert.ok(v.reasons.some(r => /occasion de \(r\)acheter/.test(r.text)));
+  assert.equal(v.action, 'Renforcer');
 });
 
 test('demo data reproduces the spec figures', () => {

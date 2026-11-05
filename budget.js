@@ -20,7 +20,7 @@ export function emptyState() {
 }
 
 // fee in cents per order, fxPct = conversion cost on non-EUR orders, targets = {isin: % of portfolio}
-const defaultProfile = () => ({ horizon: 10, risk: 'equilibre', driftPts: 5, fee: 100, fxPct: 0.25, targets: {} });
+const defaultProfile = () => ({ style: 'long', horizon: 10, risk: 'equilibre', driftPts: 5, fee: 100, fxPct: 0.25, targets: {} });
 
 export function validateState(x) {
   if (x?.version === 1 && x.settings) { // v1 → v2: market data (lot 2)
@@ -278,7 +278,7 @@ export function trend(s, isin) {
   const h = s.history[isin];
   if (!h || h.length < 50) return null;
   const closes = h.map(x => x[1]), last = closes.at(-1);
-  return { sma50: closes.slice(-50).reduce((a, b) => a + b, 0) / 50, perf3m: (last / closes[Math.max(0, closes.length - 64)] - 1) * 100,
+  return { first: closes[0], sma50: closes.slice(-50).reduce((a, b) => a + b, 0) / 50, perf3m: (last / closes[Math.max(0, closes.length - 64)] - 1) * 100,
     high: Math.max(...closes), asOf: h.at(-1)[0] };
 }
 
@@ -401,6 +401,15 @@ export const RISK = {
 const EEA = 'FR DE NL BE IT ES PT LU AT FI DK SE NO IS LI GR CY MT SI SK EE LV LT PL CZ HU RO BG HR'.split(' ');
 export const peaEligible = i => /\bPEA\b/i.test(i.name) || EEA.includes(i.isin.slice(0, 2));
 
+// shortcut: usual small-order fees per broker (fixed € per order in cents, % of the amount, % currency conversion), used
+// only when the user left them empty; indicative, the broker's own price list is the reference
+const BROKER_FEES = [
+  [/trade ?republic/i, { name: 'Trade Republic', fixed: 100, pct: 0, fx: 0 }],
+  [/ibkr|interactive/i, { name: 'IBKR', fixed: 300, pct: 0, fx: 0.03 }],
+  [/fortuneo/i, { name: 'Fortuneo', fixed: 195, pct: 0, fx: 0.25 }],
+];
+export const brokerFees = institution => BROKER_FEES.find(([re]) => re.test(institution ?? ''))?.[1] ?? null;
+
 export const DISCLAIMER = 'Information, pas un conseil en investissement. Aucun ordre n’est passé.';
 const euro = c => `${(c / 100).toFixed(2).replace('.', ',')} €`;
 const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
@@ -439,11 +448,18 @@ export function suggestions(s, today) {
         add(pts, `Poids ${pct(w)} pour une cible de ${pct(t)}${pts ? ` : ${pts > 0 ? 'sous' : 'sur'}-pondéré de ${far.toFixed(1).replace('.', ',')} points` : ', dans la tolérance'}.`);
       }
     }
-    const tr = trend(s, i.isin);
+    const tr = trend(s, i.isin), active = p.style === 'actif';
+    let takeProfit = 0;
     if (tr) {
-      const up = q.price >= tr.sma50;
-      add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source);
-      if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source);
+      const gap = (q.price / tr.sma50 - 1) * 100, longUp = tr.first < tr.sma50;
+      // active style: a dip inside a rising trend is a chance to buy back, instead of a sell signal
+      if (active && gap <= -7 && longUp) add(2, `Repli de ${pct(-gap)} sous sa moyenne 50 jours alors que la tendance de fond monte : occasion de (r)acheter.`, tr.asOf, q.source);
+      else {
+        const up = q.price >= tr.sma50;
+        add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source);
+        if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source);
+      }
+      if (active && isHeld && gap >= 12) takeProfit = gap;
     } else add(0, 'Tendance inconnue : historique insuffisant (actualisez en ligne).');
     const recent = s.news.filter(n => n.isin === i.isin && dayNum(today) - dayNum(n.publishedAt) <= 14);
     const tones = recent.map(n => n.sentiment).filter(Number.isFinite);
@@ -456,7 +472,14 @@ export function suggestions(s, today) {
     const notable = recent.filter(n => NOTABLE.test(n.title));
     for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source);
     let limitHit = false;
-    for (const l of lines.filter(l => l.isin === i.isin && l.cost > 0)) {
+    const mine = lines.filter(l => l.isin === i.isin && l.cost > 0), gainAll = mine.reduce((a, l) => a + l.gain, 0);
+    if (takeProfit && gainAll > 0) { // active style: sell part of a strong rise, buy back later on a dip
+      limitHit = true;
+      const pea = mine.every(l => s.accounts.find(a => a.id === l.accountId)?.type === 'PEA');
+      add(-2, `Forte hausse : ${pct(takeProfit)} au-dessus de sa moyenne 50 jours, avec ${euro(gainAll)} de plus-value : prendre une partie des bénéfices (vendre environ un tiers).`
+        + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposé à 30 %.'));
+    }
+    for (const l of mine) {
       const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
       const drop = hi ? ((hi - q.price) * 100) / hi : 0;
       if (gain <= -risk.maxLoss) { limitHit = true; add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`); }
@@ -485,7 +508,8 @@ export function suggestions(s, today) {
     const price = s.quotes[i.isin].price, rate = i.currency === 'EUR' ? 1 : s.fx[i.currency].rate;
     // each broker's own fees (fixed per order, % of the amount, currency conversion), else the profile's estimate
     const plan = a => {
-      const fixed = a.feeFixed ?? p.fee, rest = (1 + (a.feePct ?? 0) / 100) * (1 + (i.currency === 'EUR' ? 0 : (a.fxPct ?? p.fxPct) / 100));
+      const est = brokerFees(a.institution) ?? {};
+      const fixed = a.feeFixed ?? est.fixed ?? p.fee, rest = (1 + (a.feePct ?? est.pct ?? 0) / 100) * (1 + (i.currency === 'EUR' ? 0 : (a.fxPct ?? est.fx ?? p.fxPct) / 100));
       const raw = (price * 100 * rest) / rate, unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
       // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
       const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);

@@ -105,7 +105,8 @@ function sheet() {
         <div class="grid2"><label>Par ordre (€)<input name="feeFixed" inputmode="decimal" value="${a?.feeFixed != null ? pctVal(a.feeFixed / 100) : ''}"></label><label>En % du montant<input name="feePct" inputmode="decimal" value="${pctVal(a?.feePct)}"></label></div>
         <label>Change hors euro (%)<input name="fxPct" inputmode="decimal" value="${pctVal(a?.fxPct)}"></label>
         <label class="chk"><input type="checkbox" name="fractional"${a?.fractional ? ' checked' : ''}> Fractions de parts possibles</label>
-        ${empty('Recopiez la grille de votre courtier. L’app achète sur le PEA quand le titre y est éligible, sinon sur le compte le moins cher.')}</div></details>
+        ${empty((est => (est ? `Laissez vide pour utiliser l’estimation ${est.name} : ${eur(est.fixed)} par ordre${est.fx ? `, ${String(est.fx).replace('.', ',')} % de change hors euro` : ''}. ` : 'Laissez vide pour l’estimation de votre profil (1 € par ordre). '))(B.brokerFees(a?.institution))
+          + 'Si vous connaissez vos vrais frais, notez-les : l’app achète sur le PEA quand le titre y est éligible, sinon sur le compte le moins cher.')}</div></details>
         <button>Enregistrer</button>${a ? btn('delAcc', a.id, 'Supprimer ce compte', 'danger') : ''}${cancelBtn}</form>`;
     },
     budget: () => {
@@ -168,6 +169,23 @@ function spark(isin) {
   const lo = Math.min(...h), hi = Math.max(...h), y = p => 26 - ((p - lo) / (hi - lo || 1)) * 24;
   return `<svg class="spark" viewBox="0 0 72 28" aria-hidden="true"><polyline fill="none" stroke="${h.at(-1) >= h[0] ? 'var(--good)' : 'var(--bad)'}" stroke-width="2" stroke-linejoin="round"
     points="${h.map((p, k) => `${((k * 72) / (h.length - 1)).toFixed(1)},${y(p).toFixed(1)}`).join(' ')}"/></svg>`;
+}
+// The title's price over 1, 3 or 6 months (daily closes), with its change over the period, high and low.
+function priceChart(isin, currency) {
+  const all = S.history[isin] ?? [], range = view.range ?? '3m';
+  if (all.length < 2) return empty('La courbe apparaît après la première actualisation des cours.');
+  const h = all.slice(-{ '1m': 22, '3m': 63, '6m': 130 }[range]), p = h.map(x => x[1]);
+  const lo = Math.min(...p), hi = Math.max(...p), W = 320, H = 150, x = k => (k * W) / (h.length - 1), y = v => 14 + (1 - (v - lo) / (hi - lo || 1)) * (H - 40);
+  const up = p.at(-1) >= p[0], col = up ? 'var(--good)' : 'var(--bad)', chg = (p.at(-1) / p[0] - 1) * 100;
+  const pts = h.map((q, k) => `${x(k).toFixed(1)},${y(q[1]).toFixed(1)}`).join(' '), two = v => v.toFixed(2).replace('.', ',');
+  return `<div style="display:flex;justify-content:space-between;align-items:baseline"><b style="font-size:22px">${two(p.at(-1))} ${currency}</b>`
+    + `<b style="color:${col}">${chg >= 0 ? '▲ +' : '▼ '}${chg.toFixed(1).replace('.', ',')} %</b></div>`
+    + `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du cours" style="width:100%;height:auto;margin-top:4px">`
+    + `<defs><linearGradient id="pg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${up ? '#16a34a' : '#dc2626'}" stop-opacity=".28"/><stop offset="1" stop-color="${up ? '#16a34a' : '#dc2626'}" stop-opacity="0"/></linearGradient></defs>`
+    + `<polygon fill="url(#pg)" points="0,${H - 26} ${pts} ${W},${H - 26}"/><polyline fill="none" stroke="${col}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`
+    + `<text x="2" y="10" font-size="10" fill="var(--muted)">max ${two(hi)}</text><text x="2" y="${H - 30}" font-size="10" fill="var(--muted)">min ${two(lo)}</text>`
+    + `<text x="2" y="${H - 6}" font-size="10" fill="var(--muted)">${shortDate(h[0][0])}</text><text x="${W - 2}" y="${H - 6}" font-size="10" text-anchor="end" fill="var(--muted)">${shortDate(h.at(-1)[0])}</text></svg>`
+    + `<div class="seg">${[['1m', '1 mois'], ['3m', '3 mois'], ['6m', '6 mois']].map(([r, t]) => `<button class="${range === r ? '' : 'ghost'}" data-act="range" data-id="${r}">${t}</button>`).join('')}</div>`;
 }
 const fab = () => `<button class="fab" data-act="newOp" aria-label="Ajouter un mouvement">＋</button>`;
 
@@ -287,7 +305,8 @@ const views = {
       if (!i || !x) return '';
       const q = S.quotes[isin], news = B.newsFor(S, isin), noOps = !S.ops.some(o => o.isin === isin) && !lines.some(l => l.isin === isin);
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
-        `<div style="margin-bottom:8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
+        priceChart(isin, i.currency)
+        + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
         + x.reasons.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}</span></div>`).join('')
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
@@ -372,6 +391,9 @@ const views = {
           + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
       }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
       + fold('profile', 'Mon profil et mes cibles', `<form data-form="profile">
+        <div class="muted">Ma façon d’investir</div>
+        <div class="chips">${chip('style', 'long', '🌳 Long terme : je garde', pf.style !== 'actif')}${chip('style', 'actif', '🔄 Actif : je vends les fortes hausses, je rachète les baisses', pf.style === 'actif')}</div>
+        ${empty('En style actif, plus d’allers-retours veut dire plus de frais et, sur un compte-titres, plus d’impôts : à privilégier sur le PEA.')}
         <div class="muted">Je garde mes placements environ</div>
         <div class="chips">${[...new Set([2, 5, 10, 20, pf.horizon])].sort((x, y) => x - y).map(h => chip('horizon', h, `${h} ans`, pf.horizon === h)).join('')}</div>
         <div class="muted">Je supporte une baisse de</div>
@@ -482,6 +504,7 @@ const actions = {
   newOp: () => { view.edit = null; view.sheet = true; view.focusAmount = true; },
   closeSheet: () => { view.edit = null; view.sheet = false; },
   panel: id => { view.sheet = id; },
+  range: r => { view.range = r; },
   prevMonth: () => { view.month = B.monthsBack(view.month, 2)[0]; },
   nextMonth: () => { view.month = new Date(Date.UTC(+view.month.slice(0, 4), +view.month.slice(5, 7), 1)).toISOString().slice(0, 7); },
   del: id => { if (confirm('Supprimer ce mouvement ?')) { B.deleteOp(S, id); view.edit = null; view.sheet = false; } },
@@ -519,7 +542,7 @@ const actions = {
     B.markNotified(S, [], today());
   },
   notifOff: () => { S.settings.notify = false; },
-  testNotif: async () => (await navigator.serviceWorker.ready).showNotification('Budget', { body: 'Les notifications fonctionnent.', icon: 'apple-touch-icon.png' }),
+  testNotif: async () => (await navigator.serviceWorker.ready).showNotification('Boussole', { body: 'Les notifications fonctionnent.', icon: 'icon-192.png' }),
   pick: k => {
     const r = view.search.results[+k], target = S.instruments.find(x => x.isin === view.search.forIsin);
     // with the price service, the result is a Yahoo listing; its real currency arrives with the first price
@@ -581,7 +604,7 @@ const forms = {
     if (Object.values(targets).reduce((a, b) => a + b, 0) > 100.0001) throw new Error('La somme des cibles dépasse 100 %');
     const fee = parseEur(f.fee);
     if (!B.RISK[f.risk] || fee < 0) throw new Error('Valeur de profil invalide');
-    S.settings.profile = { horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
+    S.settings.profile = { style: f.style === 'actif' ? 'actif' : 'long', horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
   },
   quote: f => B.setQuote(S, f.isin, decimal(f.price), f.date),
   market: f => {
@@ -663,7 +686,11 @@ async function notify() {
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-tab],[data-act]');
   if (!t) return;
-  if (t.dataset.tab) { view.tab = t.dataset.tab; view.edit = null; scrollTo(0, 0); return render(); }
+  if (t.dataset.tab) {
+    if (t.dataset.tab !== view.tab) history.pushState({ tab: t.dataset.tab }, '');
+    view.tab = t.dataset.tab; view.edit = null; view.sheet = false; scrollTo(0, 0); return render();
+  }
+  if (['newOp', 'edit', 'panel', 'inst'].includes(t.dataset.act)) history.pushState({ tab: view.tab, layer: true }, ''); // the back button closes it
   e.preventDefault();
   run(() => actions[t.dataset.act](t.dataset.id));
 });
@@ -699,5 +726,12 @@ const startTab = new URLSearchParams(location.search).get('tab'); // set by a ta
 if (views[startTab]) view.tab = startTab;
 // payments entered before automatic matching existed: settle the planned items they correspond to
 if (S.ops.filter(o => B.monthOf(o.date) >= B.monthOf(today()) && !o.planned).map(o => B.autoMatch(S, o)).some(Boolean)) save();
+// Android back button: closes the open panel or title sheet first, then goes back to the previous tab
+history.replaceState({ tab: view.tab }, '');
+addEventListener('popstate', e => {
+  if (view.sheet || view.inst) { view.sheet = false; view.edit = null; view.inst = null; }
+  else view.tab = e.state?.tab ?? 'dash';
+  render();
+});
 render();
 notify();
