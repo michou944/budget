@@ -80,14 +80,74 @@ const onboarding = () => card('Bienvenue 👋', empty('Aucun compte pour l’ins
   + `<div class="grid2" style="margin-top:12px"><button data-tab="settings">Créer un compte</button><button class="ghost" data-act="demo">Voir la démo</button></div>`);
 
 // Bottom panel to add or change an entry: big amount, categories and accounts as icons to tap, no drop-down list.
+// an account that is neither current nor savings and has no type yet is a brokerage account (created before types existed)
+const accKind = a => (a.type === 'PEA' ? 'pea' : a.type === 'CTO' ? 'cto' : a.savings ? 'epargne' : a.liquid ? 'courant' : 'cto');
+const chip = (name, value, label, on) => `<label><input type="radio" name="${name}" value="${esc(value)}"${on ? ' checked' : ''}><span>${label}</span></label>`;
+const catChips = sel => `<div class="cats">${[...S.categories.map(c => [c.id, c.name]), ['', 'Aucune']].map(([id, n]) => `<label><input type="radio" name="categoryId" value="${esc(id)}"${(sel ?? '') === id ? ' checked' : ''}><span><b>${id ? catIcon(n) : '·'}</b>${esc(n)}</span></label>`).join('')}</div>`;
+const cancelBtn = '<button type="button" class="ghost" data-act="closeSheet">Annuler</button>';
+
+// Panels opened from Réglages (one per topic) and the entry panel: same look, no drop-down list for everyday choices.
 function sheet() {
   if (!view.sheet) return '';
+  const [kind, id] = view.sheet === true ? ['op'] : view.sheet.split(':');
+  const st = S.settings, a = id && S.accounts.find(x => x.id === id);
+  const body = {
+    op: opSheet,
+    account: () => {
+      const t = !a ? 'courant' : accKind(a);
+      const pctVal = v => (v != null ? String(v).replace('.', ',') : '');
+      return `<h2>${a ? esc(a.name) : 'Nouveau compte'}</h2><form data-form="account"><input type="hidden" name="id" value="${a?.id ?? ''}">
+        <div class="chips">${chip('acctype', 'courant', '🏦 Courant', t === 'courant')}${chip('acctype', 'epargne', '🐷 Épargne', t === 'epargne')}${chip('acctype', 'cto', '📈 Compte-titres', t === 'cto')}${chip('acctype', 'pea', '📈 PEA', t === 'pea')}</div>
+        <label>Nom<input name="name" value="${esc(a?.name)}" placeholder="ex. Compte joint" required></label>
+        <label>Banque ou courtier<input name="institution" value="${esc(a?.institution)}" placeholder="ex. BCP, Fortuneo, Trade Republic" required></label>
+        <label>Solde de départ (€)<input name="opening" inputmode="decimal" value="${a ? euros(a.opening) : ''}" placeholder="0"></label>
+        <details${a?.type ? ' open' : ''}><summary class="muted">Bourse : frais du courtier</summary><div style="display:grid;gap:10px;margin-top:10px">
+        <div class="grid2"><label>Par ordre (€)<input name="feeFixed" inputmode="decimal" value="${a?.feeFixed != null ? pctVal(a.feeFixed / 100) : ''}"></label><label>En % du montant<input name="feePct" inputmode="decimal" value="${pctVal(a?.feePct)}"></label></div>
+        <label>Change hors euro (%)<input name="fxPct" inputmode="decimal" value="${pctVal(a?.fxPct)}"></label>
+        <label class="chk"><input type="checkbox" name="fractional"${a?.fractional ? ' checked' : ''}> Fractions de parts possibles</label>
+        ${empty('Recopiez la grille de votre courtier. L’app achète sur le PEA quand le titre y est éligible, sinon sur le compte le moins cher.')}</div></details>
+        <button>Enregistrer</button>${a ? btn('delAcc', a.id, 'Supprimer ce compte', 'danger') : ''}${cancelBtn}</form>`;
+    },
+    budget: () => {
+      const pcts = [...new Set([70, 80, 90, 100, st.alertPct])].sort((x, y) => x - y);
+      return `<h2>🎯 Épargne, plafond et alertes</h2><form data-form="settings">
+        <label>Mettre de côté chaque mois (€)<input name="reserve" inputmode="decimal" value="${euros(st.reserve)}" placeholder="0"></label>
+        <label>Plafond de dépenses du mois (€, vide = aucun)<input name="globalCap" inputmode="decimal" value="${euros(st.globalCap)}"></label>
+        <div class="muted">M’alerter quand un plafond atteint</div><div class="chips">${pcts.map(p => chip('alertPct', p, `${p} %`, st.alertPct === p)).join('')}</div>
+        <label>M’alerter quand le reste à dépenser passe sous (€)<input name="lowSpendable" inputmode="decimal" value="${euros(st.lowSpendable)}"></label>
+        <button>Enregistrer</button>${cancelBtn}</form>`;
+    },
+    rec: () => `<h2>🔁 Échéances récurrentes</h2>`
+      + (S.recurring.map(r => `<div class="op"><div class="av">${r.kind === 'income' ? '💶' : catIcon(catName(r.categoryId))}</div><div class="l">${esc(r.label)}<div class="muted">le ${r.day} de chaque mois · ${esc(accName(r.accountId))}</div></div>`
+        + `<div class="r">${money(B.signed(r.kind, r.cents))}<div class="actions">${btn('delRec', r.id, 'Suppr.', 'small danger')}</div></div></div>`).join('') || empty('Aucune pour l’instant.'))
+      + `<h2 style="margin-top:16px">Ajouter</h2><form data-form="rec">
+        <div class="chips" style="justify-content:center">${chip('kind', 'expense', 'Dépense', true)}${chip('kind', 'income', 'Entrée (salaire…)', false)}</div>
+        <div class="amount"><input name="amount" inputmode="decimal" placeholder="0,00 €" required aria-label="Montant en euros"></div>
+        <input name="label" placeholder="Nom : loyer, Netflix, salaire…" required>${catChips('')}
+        <div class="muted">Compte</div><div class="chips">${S.accounts.map((x, k) => chip('accountId', x.id, esc(x.name), k === 0)).join('')}</div>
+        <label>Le combien du mois ?<input name="day" type="number" min="1" max="31" placeholder="ex. 5" required></label>
+        <button>Ajouter l’échéance</button>${cancelBtn}${empty('Chaque mois, elle apparaît dans « À venir » et compte comme payée à sa date.')}</form>`,
+    cats: () => `<h2>🏷️ Catégories et plafonds</h2>${empty('Un plafond est un budget maximum par mois (vide = aucun).')}`
+      + S.categories.map(c => `<form data-form="cat" class="op" style="display:grid;grid-template-columns:auto 1fr 90px auto;gap:8px;align-items:center"><input type="hidden" name="id" value="${c.id}">
+        <div class="av">${catIcon(c.name)}</div><input name="name" value="${esc(c.name)}" required aria-label="Nom"><input name="cap" inputmode="decimal" value="${euros(c.cap)}" placeholder="Plafond" aria-label="Plafond mensuel">
+        <button class="small">OK</button></form>`).join('')
+      + `<form data-form="cat" style="margin-top:12px;grid-template-columns:1fr 90px auto;display:grid;gap:8px"><input name="name" placeholder="Nouvelle catégorie" required><input name="cap" inputmode="decimal" placeholder="Plafond"><button class="small">Ajouter</button></form>`
+      + `<div style="margin-top:12px">${S.categories.map(c => btn('delCat', c.id, `🗑 ${esc(c.name)}`, 'small danger')).join(' ')}</div>${cancelBtn}`,
+    backup: () => `<h2>💾 Sauvegarde et export</h2><form data-form="backup"><label>Mot de passe de la sauvegarde<input type="password" name="pw" placeholder="8 caractères minimum" autocomplete="new-password" required></label>
+        <button>Télécharger une sauvegarde chiffrée</button></form>
+        <form data-form="restore" style="margin-top:16px"><div class="muted">Restaurer une sauvegarde (remplace les données de ce téléphone)</div><input type="file" name="file" accept=".json,application/json" required>
+        <input type="password" name="pw" placeholder="Mot de passe de la sauvegarde" autocomplete="current-password" required><button class="ghost">Restaurer</button></form>
+        <div style="margin-top:16px;display:grid;gap:10px">${btn('csv', '', 'Exporter les mouvements (CSV, pour Excel)', 'ghost')}${cancelBtn}</div>`,
+  }[kind]?.();
+  return body ? `<div class="sheet-bg" data-act="closeSheet"></div><div class="sheet" role="dialog"><div class="grip"></div>${body}</div>` : '';
+}
+
+function opSheet() {
   const e = view.edit && S.ops.find(o => o.id === view.edit), t = today(), y = new Date(Date.now() - 864e5).toLocaleDateString('sv-SE');
   const when = !e || e.date === t ? 'today' : e.date === y ? 'yesterday' : 'other', kind = e?.kind ?? 'expense';
   const acc = e?.accountId ?? (view.account || S.accounts.find(a => a.liquid)?.id || S.accounts[0]?.id);
   const radio = (name, value, label, on) => `<label><input type="radio" name="${name}" value="${esc(value)}"${on ? ' checked' : ''}><span>${label}</span></label>`;
-  return `<div class="sheet-bg" data-act="closeSheet"></div><div class="sheet" role="dialog" aria-label="${e ? 'Modifier le mouvement' : 'Nouveau mouvement'}"><div class="grip"></div>
-    <form data-form="op">
+  return `<form data-form="op" aria-label="${e ? 'Modifier le mouvement' : 'Nouveau mouvement'}">
     <div class="chips" style="justify-content:center">${radio('kind', 'expense', 'Dépense', kind === 'expense')}${radio('kind', 'income', 'Entrée', kind === 'income')}${radio('kind', 'refund', 'Remboursement', kind === 'refund')}</div>
     <div class="amount"><input name="amount" inputmode="decimal" placeholder="0,00 €" required value="${e ? euros(Math.abs(e.amount)) : ''}" aria-label="Montant en euros"></div>
     <div class="muted">Catégorie</div>
@@ -99,7 +159,7 @@ function sheet() {
     <label class="chk"><input type="checkbox" name="planned"${e?.planned ? ' checked' : ''}> Pas encore payé (à venir)</label>
     <button style="padding:15px;font-size:16px">${e ? 'Enregistrer' : 'Ajouter'}</button>
     ${e ? btn('del', e.id, 'Supprimer ce mouvement', 'danger') : ''}
-    <button type="button" class="ghost" data-act="closeSheet">Annuler</button></form></div>`;
+    <button type="button" class="ghost" data-act="closeSheet">Annuler</button></form>`;
 }
 // Last 3 months of closes as a small line, green when the price went up over the period, red when down.
 function spark(isin) {
@@ -312,8 +372,10 @@ const views = {
           + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
       }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
       + fold('profile', 'Mon profil et mes cibles', `<form data-form="profile">
-        <div class="grid2"><label>Horizon (années)<input name="horizon" type="number" min="1" max="50" value="${pf.horizon}"></label>
-        <label>Risque<select name="risk">${opts(Object.entries(B.RISK).map(([k, r]) => [k, `${r.label} (perte max ${r.maxLoss} %)`]), pf.risk)}</select></label></div>
+        <div class="muted">Je garde mes placements environ</div>
+        <div class="chips">${[...new Set([2, 5, 10, 20, pf.horizon])].sort((x, y) => x - y).map(h => chip('horizon', h, `${h} ans`, pf.horizon === h)).join('')}</div>
+        <div class="muted">Je supporte une baisse de</div>
+        <div class="chips">${Object.entries(B.RISK).map(([k, r]) => chip('risk', k, `${r.label} · ${r.maxLoss} % max`, pf.risk === k)).join('')}</div>
         ${S.instruments.map(i => `<label>Part visée pour ${esc(i.name)} (%)<input name="t_${esc(i.isin)}" inputmode="decimal" value="${pf.targets[i.isin] ?? ''}"></label>`).join('')}
         <details><summary class="muted">Réglages avancés</summary>
         <div class="grid2"><label>Écart toléré (points)<input name="driftPts" type="number" min="1" max="50" value="${pf.driftPts}"></label>
@@ -339,51 +401,23 @@ const views = {
   },
 
   settings() {
-    const st = S.settings;
-    const accountForm = a => `<form data-form="account" style="padding:8px 0;border-bottom:1px solid var(--line)"><input type="hidden" name="id" value="${a?.id ?? ''}">
-      <div class="grid2"><input name="name" placeholder="Nom du compte" value="${esc(a?.name)}" required><input name="institution" placeholder="Établissement" value="${esc(a?.institution)}" required></div>
-      <input name="opening" inputmode="decimal" placeholder="Solde initial €" value="${a ? euros(a.opening) : ''}">
-      <label class="chk"><input type="checkbox" name="liquid"${!a || a.liquid ? ' checked' : ''}> Inclure dans les liquidités</label>
-      <label class="chk"><input type="checkbox" name="savings"${a?.savings ? ' checked' : ''}> Compte épargne</label>
-      <details${a?.type ? ' open' : ''}><summary class="muted">Compte de bourse : type et frais</summary>
-      <label>Type<select name="type">${opts([['', 'Compte bancaire'], ['CTO', 'Compte-titres (CTO)'], ['PEA', 'PEA']], a?.type ?? '')}</select></label>
-      <div class="grid2"><label>Frais par ordre (€)<input name="feeFixed" inputmode="decimal" value="${a?.feeFixed != null ? String(a.feeFixed / 100).replace('.', ',') : ''}"></label>
-      <label>Frais en % du montant<input name="feePct" inputmode="decimal" value="${a?.feePct != null ? String(a.feePct).replace('.', ',') : ''}"></label></div>
-      <label>Frais de change hors euro (%)<input name="fxPct" inputmode="decimal" value="${a?.fxPct != null ? String(a.fxPct).replace('.', ',') : ''}"></label>
-      <label class="chk"><input type="checkbox" name="fractional"${a?.fractional ? ' checked' : ''}> Accepte les fractions de parts (ex. Trade Republic, IBKR)</label>
-      ${empty('Recopiez les frais de la grille tarifaire de votre courtier. Vide = estimation de votre profil. L’app choisit le compte où acheter : le PEA quand le titre y est éligible, sinon le moins cher.')}</details>
-      <div class="grid2"><button class="${a ? 'ghost' : ''}">${a ? 'Enregistrer' : 'Ajouter le compte'}</button>${a ? btn('delAcc', a.id, 'Supprimer', 'danger') : ''}</div>
-      ${a ? empty('Solde actuel : ' + eur(B.balance(S, a))) : ''}</form>`;
-    const catForm = c => `<form data-form="cat" class="grid2" style="grid-template-columns:2fr 1fr auto${c ? ' auto' : ''};margin-bottom:6px"><input type="hidden" name="id" value="${c?.id ?? ''}">
-      <input name="name" value="${esc(c?.name)}" placeholder="Nouvelle catégorie" required aria-label="Nom"><input name="cap" inputmode="decimal" value="${c ? euros(c.cap) : ''}" placeholder="Plafond €" aria-label="Plafond mensuel">
-      <button class="small">${c ? 'OK' : 'Ajouter'}</button>${c ? btn('delCat', c.id, '×', 'small danger') : ''}</form>`;
-    return card('Comptes', S.accounts.map(a => fold(`acc-${a.id}`, `${esc(a.name)} <span class="muted">${esc(a.institution)} · ${eur(B.balance(S, a))}</span>`, accountForm(a))).join('')
-        + fold('accNew', '＋ Nouveau compte', accountForm(null), !S.accounts.length))
-      + fold('budget', 'Réserve, plafond global et alertes', `<form data-form="settings"><label>Réserve mensuelle (€)<input name="reserve" inputmode="decimal" value="${euros(st.reserve)}"></label>
-        <label>Plafond mensuel global (€, vide = aucun)<input name="globalCap" inputmode="decimal" value="${euros(st.globalCap)}"></label>
-        <label>Seuil d’alerte des plafonds (%)<input name="alertPct" type="number" min="1" max="100" value="${st.alertPct}"></label>
-        <label>Alerte quand le dépensable du mois passe sous (€, vide = jamais)<input name="lowSpendable" inputmode="decimal" value="${euros(st.lowSpendable)}"></label><button>Enregistrer</button></form>`)
-      + fold('notif', `Notifications${st.notify && canNotify() && Notification.permission === 'granted' ? ' · <span class="good">activées</span>' : ''}`,
-        (canNotify() ? (st.notify && Notification.permission === 'granted'
-          ? `<div class="grid2">${btn('testNotif', '', 'Envoyer un essai', 'ghost')}${btn('notifOff', '', 'Désactiver', 'ghost')}</div>`
-          : `<button data-act="notifOn">Activer les notifications</button>${Notification.permission === 'denied' ? empty('Refusées dans les réglages du téléphone : autorisez-les pour cette app, puis réessayez.') : ''}`)
-          : empty('Sur iPhone : ajoutez d’abord l’app à l’écran d’accueil (iOS 16.4 ou plus), puis ouvrez-la depuis l’icône.'))
-        + empty('Vous êtes prévenu quand un avis change (Acheter, Renforcer, Alléger, Vendre, À examiner), quand un plafond de catégorie est atteint, et quand le dépensable passe sous le seuil choisi dans « Réserve, plafond global et alertes ».')
-        + empty('Sans serveur, les avis sont calculés quand l’app est ouverte ou actualisée, pas pendant qu’elle est fermée.'))
-      + fold('rec', `Échéances récurrentes (loyer, abonnements…)${S.recurring.length ? ` · ${S.recurring.length}` : ''}`,
-        S.recurring.map(r => `<div class="op"><div class="l">${esc(r.label)}<div class="muted">le ${r.day} de chaque mois · ${esc(accName(r.accountId))}</div></div>`
-          + `<div class="r">${money(B.signed(r.kind, r.cents))}<div class="actions">${btn('delRec', r.id, 'Suppr.', 'small danger')}</div></div></div>`).join('')
-        + `<form data-form="rec" style="margin-top:8px"><div class="grid2"><select name="kind">${opts([['expense', 'Sortie'], ['income', 'Entrée']], 'expense')}</select><input name="amount" inputmode="decimal" placeholder="Montant €" required></div>
-        <div class="grid2"><select name="accountId">${accOpts()}</select><input name="day" type="number" min="1" max="31" placeholder="Jour du mois" required></div>
-        <select name="categoryId">${catOpts()}</select><input name="label" placeholder="Libellé (loyer, abonnement…)" required><button class="ghost">Ajouter</button></form>`
-        + empty('Elles apparaissent chaque mois dans « À venir » sur l’Accueil, avec un bouton « Payé ✓ ».'))
-      + fold('cats', 'Catégories et plafonds mensuels', S.categories.map(catForm).join('') + catForm(null))
-      + fold('backup', 'Sauvegarde et export', `<form data-form="backup"><input type="password" name="pw" placeholder="Mot de passe (8 caractères min.)" autocomplete="new-password" required>
-        <button>Télécharger une sauvegarde chiffrée</button></form><br>
-        <form data-form="restore"><input type="file" name="file" accept=".json,application/json" required><input type="password" name="pw" placeholder="Mot de passe de la sauvegarde" autocomplete="current-password" required>
-        <button class="ghost">Restaurer (remplace les données)</button></form><br>${btn('csv', '', 'Exporter les opérations (CSV)', 'ghost')}`)
-      + card('Données', empty('Tout est enregistré sur ce téléphone uniquement. Pensez à sauvegarder régulièrement.')
-        + `<div class="grid2" style="margin-top:8px">${btn('demo', '', 'Charger la démo', 'ghost')}${btn('reset', '', 'Tout effacer', 'danger')}</div>`);
+    const st = S.settings, notifOn = st.notify && canNotify() && Notification.permission === 'granted';
+    const item = (id, icon, title, sub, right = '<span class="muted" style="font-size:22px">›</span>') => `<div class="op tap" data-act="panel" data-id="${esc(id)}"><div class="av">${icon}</div>`
+      + `<div class="l">${title}${sub ? `<div class="muted">${sub}</div>` : ''}</div><div class="r">${right}</div></div>`;
+    const label = { courant: 'Compte courant', epargne: 'Épargne', cto: 'Compte-titres', pea: 'PEA' }, icon = { courant: '🏦', epargne: '🐷', cto: '📈', pea: '📈' };
+    return card('Mes comptes', S.accounts.map(a => item(`account:${a.id}`, icon[accKind(a)], esc(a.name), `${esc(a.institution)} · ${label[accKind(a)]}`, money(B.balance(S, a)))).join('')
+        + item('account:', '＋', '<b style="color:var(--accent)">Ajouter un compte</b>', ''))
+      + card('Budget', item('budget:', '🎯', 'Épargne, plafond et alertes', `${eur(st.reserve)} mis de côté par mois · alerte sous ${eur(st.lowSpendable)}`)
+        + item('rec:', '🔁', 'Échéances récurrentes', S.recurring.length ? S.recurring.map(r => esc(r.label)).join(', ') : 'loyer, abonnements, salaire…')
+        + item('cats:', '🏷️', 'Catégories et plafonds', S.categories.map(c => catIcon(c.name)).join(' ')))
+      + card('Téléphone', `<div class="op"><div class="av">🔔</div><div class="l">Notifications<div class="muted">avis bourse, plafonds, reste à dépenser</div></div>`
+          + (canNotify() ? `<div class="r"><input type="checkbox" data-change="notif" aria-label="Notifications"${notifOn ? ' checked' : ''}></div>` : '') + '</div>'
+          + (!canNotify() ? empty('Sur iPhone : ajoutez d’abord l’app à l’écran d’accueil, puis ouvrez-la depuis l’icône.')
+            : notifOn ? `<div style="margin:0 0 6px 54px">${btn('testNotif', '', 'Envoyer un essai', 'small ghost')}</div>`
+              : Notification.permission === 'denied' ? empty('Refusées dans les réglages du téléphone : autorisez-les pour cette app.') : '')
+        + item('backup:', '💾', 'Sauvegarde et export', 'sauvegarde chiffrée, restauration, fichier Excel'))
+      + card('Données', empty('Tout est enregistré sur ce téléphone uniquement. Pensez à faire une sauvegarde de temps en temps.')
+        + `<div class="grid2" style="margin-top:10px">${btn('demo', '', 'Charger la démo', 'ghost')}${btn('reset', '', 'Tout effacer', 'danger')}</div>`);
   },
 };
 
@@ -447,6 +481,7 @@ const actions = {
   edit: id => { view.edit = id; view.sheet = true; },
   newOp: () => { view.edit = null; view.sheet = true; view.focusAmount = true; },
   closeSheet: () => { view.edit = null; view.sheet = false; },
+  panel: id => { view.sheet = id; },
   prevMonth: () => { view.month = B.monthsBack(view.month, 2)[0]; },
   nextMonth: () => { view.month = new Date(Date.UTC(+view.month.slice(0, 4), +view.month.slice(5, 7), 1)).toISOString().slice(0, 7); },
   del: id => { if (confirm('Supprimer ce mouvement ?')) { B.deleteOp(S, id); view.edit = null; view.sheet = false; } },
@@ -509,7 +544,7 @@ const actions = {
   confirmImport: () => { const n = B.importRows(S, view.preview.accountId, view.preview.rows, today()); view.preview = null; alert(`${n} opération(s) importée(s).`); },
   delAcc: id => {
     if (S.ops.some(o => o.accountId === id) || S.recurring.some(r => r.accountId === id)) throw new Error('Ce compte a des opérations ou échéances : supprimez-les d’abord.');
-    if (confirm('Supprimer ce compte ?')) S.accounts = S.accounts.filter(a => a.id !== id);
+    if (confirm('Supprimer ce compte ?')) { S.accounts = S.accounts.filter(a => a.id !== id); view.sheet = false; }
   },
   delCat: id => {
     if (!confirm('Supprimer cette catégorie ? Les opérations sont conservées, sans catégorie.')) return;
@@ -564,8 +599,9 @@ const forms = {
   },
   account: f => {
     const pctOrNone = v => { if (!String(v ?? '').trim()) return undefined; const x = Number(String(v).replace(',', '.')); if (!(x >= 0 && x <= 20)) throw new Error('Pourcentage de frais invalide'); return x; };
-    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on', fractional: f.fractional === 'on',
-      type: f.type || undefined, feeFixed: String(f.feeFixed ?? '').trim() ? parseEur(f.feeFixed) : undefined, feePct: pctOrNone(f.feePct), fxPct: pctOrNone(f.fxPct) };
+    const t = f.acctype ?? 'courant'; // courant | epargne | cto | pea, chosen as a chip
+    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: t === 'courant', savings: t === 'epargne', fractional: f.fractional === 'on',
+      type: t === 'cto' ? 'CTO' : t === 'pea' ? 'PEA' : undefined, feeFixed: String(f.feeFixed ?? '').trim() ? parseEur(f.feeFixed) : undefined, feePct: pctOrNone(f.feePct), fxPct: pctOrNone(f.fxPct) };
     if (a.feeFixed < 0) throw new Error('Frais invalides');
     if (f.id) Object.assign(S.accounts.find(x => x.id === f.id), a); else S.accounts.push({ id: B.uid(), ...a });
   },
@@ -634,13 +670,17 @@ document.addEventListener('click', e => {
 document.addEventListener('submit', e => {
   e.preventDefault();
   const form = e.target;
-  run(() => forms[form.dataset.form](Object.fromEntries(new FormData(form)), form));
+  run(async () => {
+    await forms[form.dataset.form](Object.fromEntries(new FormData(form)), form);
+    if (form.closest('.sheet') && form.dataset.form !== 'cat') { view.sheet = false; view.edit = null; } // saved: the panel closes (categories stay open to edit several)
+  });
 });
 document.addEventListener('change', e => {
   const k = e.target.dataset.change;
   if (!k) return;
   // picking a date in the entry panel ticks « Autre date » without redrawing (that would lose what is typed)
   if (k === 'otherDate') { const r = e.target.form.querySelector('[name=when][value=other]'); if (r) r.checked = true; return; }
+  if (k === 'notif') return run(() => (e.target.checked ? actions.notifOn() : actions.notifOff()));
   if (k === 'month' && e.target.value) view.month = e.target.value;
   if (k === 'account') view.account = e.target.value;
   if (k === 'keep') view.preview.rows[+e.target.dataset.id].keep = e.target.checked;
