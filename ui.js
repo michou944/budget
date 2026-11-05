@@ -53,7 +53,7 @@ const btn = (act, id, text, cls = 'small ghost') => `<button class="${cls}" data
 const fold = (key, title, body, open) => `<details class="card fold" data-fold="${key}"${open || view.open.has(key) ? ' open' : ''}><summary>${title}</summary>${body}</details>`;
 
 function opItem(o) {
-  const tags = [o.planned && 'à venir', o.plannedId && 'prévu ✓', o.transferId && 'virement interne', o.envelopeId && 'achat bourse', o.kind === 'refund' && 'remboursement'].filter(Boolean);
+  const tags = [o.planned && 'à venir', o.plannedId && 'prévu ✓', o.autoPaid && 'payé à échéance', o.transferId && 'virement interne', o.envelopeId && 'achat bourse', o.kind === 'refund' && 'remboursement'].filter(Boolean);
   const act = o.transferId ? btn('unlink', o.transferId, 'Délier') + btn('del', o.id, 'Suppr.', 'small danger')
     : o.envelopeId ? btn('del', o.id, 'Suppr.', 'small danger') : btn('edit', o.id, 'Modifier');
   return `<div class="op"><div class="l">${esc(o.label || B.KINDS[o.kind])}${tags.map(t => `<span class="tag">${t}</span>`).join('')}`
@@ -87,8 +87,9 @@ const views = {
         + row('Solde du mois (entrées − sorties)', st.toDate, 'total') + (st.savedTransfer ? row('Mis sur l’épargne', st.savedTransfer) : '')
         + `<div style="margin-top:6px">${btn('goOps', '', 'Voir le détail des mouvements →', 'small ghost')}</div>`)
       + card(`À venir${up.length ? ` · ${up.length}` : ''}`, up.map(o => `<div class="op"><div class="l">${esc(o.label || catName(o.categoryId) || B.KINDS[o.kind])}`
-        + `<div class="muted">${o.date} · ${esc(accName(o.accountId))}</div></div><div class="r">${money(o.amount)}`
-        + `<div class="actions">${btn('paid', o.id, o.amount > 0 ? 'Reçu ✓' : 'Payé ✓', 'small')}</div></div></div>`).join('')
+        + `<div class="muted">le ${new Date(o.date + 'T12:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' })} · ${esc(accName(o.accountId))}</div></div><div class="r">${money(o.amount)}`
+        + `<div class="actions">${btn('edit', o.id, 'Modifier')}</div></div></div>`).join('')
+        + (up.length ? empty('Chaque échéance est comptée comme payée à sa date. Si la banque prélève un autre montant, saisissez ou importez le vrai mouvement : il la remplace.') : '')
         || empty('Rien à venir. Vos échéances récurrentes (loyer, abonnements…) se règlent dans Réglages.'))
       + (paid.length ? card(`Déjà payé ce mois · ${eur(paid.reduce((t, o) => t - o.amount, 0))}`, paid.slice(0, 8).map(opItem).join('')
         + (paid.length > 8 ? `<div style="margin-top:6px">${btn('goOps', '', `Voir les ${paid.length} paiements →`, 'small ghost')}</div>` : '')) : '')
@@ -377,7 +378,6 @@ const actions = {
   notLink: id => { for (const o of S.ops) if (pair(id).includes(o.id)) o.notTransfer = true; },
   dismiss: id => S.dismissedAlerts.push(id),
   unmatch: id => B.unmatch(S, id),
-  paid: id => B.markPaid(S, id, today()),
   goOps: () => { view.tab = 'ops'; scrollTo(0, 0); },
   delRec: id => { S.recurring = S.recurring.filter(r => r.id !== id); },
   release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
@@ -520,6 +520,7 @@ const forms = {
 function render() {
   // recurring items of the month shown (and later ones) appear on their own: no « générer » button
   if (view.month >= B.monthOf(today()) && B.generateRecurring(S, view.month)) save();
+  if (B.settleDue(S, today())) save(); // due items are paid on their date, no button to press
   app.innerHTML = !S.accounts.length && view.tab !== 'settings' ? onboarding() : views[view.tab]();
   for (const b of document.querySelectorAll('nav button')) b.toggleAttribute('aria-current', b.dataset.tab === view.tab);
   document.querySelector(`nav [data-tab="${view.tab}"]`).setAttribute('aria-current', 'page');

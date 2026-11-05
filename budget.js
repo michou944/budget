@@ -170,22 +170,26 @@ export const unmatch = unmatchPlanned;
 
 // A real operation that looks like a planned one settles it, so it is never counted twice: same month and
 // direction, same account or category, amount within 10 % (at least 5 €). The closest amount wins.
+// The same test also finds an item already counted as paid on its due date: the real payment then replaces it.
 export function autoMatch(s, real) {
-  if (real.planned || real.plannedId || !['income', 'expense', 'refund'].includes(real.kind)) return false;
+  if (real.planned || real.plannedId || real.autoPaid || !['income', 'expense', 'refund'].includes(real.kind)) return false;
   const taken = new Set(s.ops.map(o => o.plannedId).filter(Boolean));
-  const p = s.ops.filter(x => x.planned && !taken.has(x.id) && x.kind === real.kind && monthOf(x.date) === monthOf(real.date)
+  const p = s.ops.filter(x => (x.planned || x.autoPaid) && x !== real && !taken.has(x.id) && x.kind === real.kind && monthOf(x.date) === monthOf(real.date)
       && (x.accountId === real.accountId || (x.categoryId && x.categoryId === real.categoryId))
       && Math.abs(x.amount - real.amount) <= Math.max(500, Math.abs(x.amount) * 0.1))
     .sort((a, b) => Math.abs(a.amount - real.amount) - Math.abs(b.amount - real.amount))[0];
-  if (p) real.plannedId = p.id;
+  if (p?.autoPaid) s.ops = s.ops.filter(x => x !== p);
+  else if (p) real.plannedId = p.id;
   return !!p;
 }
 
-// « Payé ✓ » on an upcoming item: it becomes a real operation, dated today when paid in its own month.
-export function markPaid(s, id, today) {
-  const o = s.ops.find(x => x.id === id && x.planned);
-  if (!o) throw new Error('Échéance introuvable');
-  Object.assign(o, { planned: false, date: monthOf(today) === monthOf(o.date) ? today : o.date });
+// Upcoming items are taken as paid on their due date (direct debits, standing orders): no button to press.
+// A payment entered or imported later for the same item replaces the automatic one (see autoMatch).
+export function settleDue(s, today) {
+  const taken = new Set(s.ops.map(o => o.plannedId).filter(Boolean));
+  const due = s.ops.filter(o => o.planned && o.date <= today && !taken.has(o.id));
+  for (const o of due) Object.assign(o, { planned: false, autoPaid: true });
+  return due.length;
 }
 
 // shortcut: monthly recurrence only; yearly items (taxes) are entered as one-off planned ops.

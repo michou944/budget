@@ -23,16 +23,16 @@ test('B02: à date / prévu, then reconciliation counts once', () => {
   assert.equal(st.toDate, 82000); assert.equal(st.forecast, 82000);
 });
 
-test('« Payé ✓ » turns an upcoming item into a payment; an unrelated expense does not settle it', () => {
+test('An upcoming item counts as paid on its due date; the real payment entered later replaces it, never twice', () => {
   const s = base(), cat = s.categories[3].id;
   B.saveOp(s, { accountId: 'a', date: `${M}-10`, kind: 'expense', cents: 15000, categoryId: cat, label: 'Assurance auto', planned: true });
-  B.saveOp(s, { accountId: 'b', date: `${M}-05`, kind: 'expense', cents: 4000, label: 'Courses' }); // other account, other amount
-  assert.equal(B.upcoming(s, M).length, 1);
-  B.markPaid(s, B.upcoming(s, M)[0].id, `${M}-04`);
-  assert.equal(B.upcoming(s, M).length, 0);
-  const st = B.monthStats(s, M);
-  assert.equal(st.spent, 19000); assert.equal(st.forecast, -19000);
-  assert.equal(s.ops.find(o => o.label === 'Assurance auto').date, `${M}-04`);
+  B.saveOp(s, { accountId: 'b', date: `${M}-05`, kind: 'expense', cents: 4000, label: 'Courses' }); // other account, other amount: unrelated
+  assert.equal(B.settleDue(s, `${M}-09`), 0); assert.equal(B.upcoming(s, M).length, 1); // not due yet
+  assert.equal(B.settleDue(s, `${M}-10`), 1); assert.equal(B.upcoming(s, M).length, 0);
+  assert.equal(B.monthStats(s, M).spent, 19000);
+  B.saveOp(s, { accountId: 'a', date: `${M}-11`, kind: 'expense', cents: 15200, categoryId: cat, label: 'PRLV ASSURANCE' }); // the bank's real debit
+  assert.equal(B.monthStats(s, M).spent, 19200); // 152 € replaces 150 €, not added to it
+  assert.equal(s.ops.filter(o => /ssurance/i.test(o.label)).length, 1);
 });
 
 test('A price far from what was paid is set aside as « à vérifier » instead of showing a false loss', () => {
