@@ -1,5 +1,5 @@
 import * as B from './budget.js';
-import { refreshMarket, refreshNews, searchSymbols, discover } from './market.js';
+import { refreshMarket, refreshNews, searchSymbols, discover, checkNewsKey } from './market.js';
 
 const KEY = 'budget.v1';
 const app = document.getElementById('app');
@@ -31,6 +31,12 @@ const parseEur = v => {
 const positive = v => { const n = parseEur(v); if (n <= 0) throw new Error('Montant invalide'); return n; };
 const decimal = v => { const n = Number(String(v).replace(/[\s ]/g, '').replace(',', '.')); if (!(n > 0)) throw new Error('Nombre invalide'); return n; };
 const num = n => n.toLocaleString('fr-FR', { maximumFractionDigits: 6 });
+// technical errors from the price and news services, said in plain words with what to do
+const plain = e => (/marketaux[^:]*: HTTP 401/i.test(e) ? 'Clé Marketaux refusée : vérifiez-la dans « Réglages bourse » (actualités et idées en pause).'
+  : /marketaux[^:]*: HTTP (402|429)/i.test(e) ? 'Quota Marketaux du jour atteint : actualités et idées reprendront demain.'
+    : /Alpha Vantage : /.test(e) ? 'Quota Alpha Vantage du jour atteint : configurez le service de cours pour ne plus en dépendre.'
+      : /pas de symbole de cours/.test(e) ? e.replace(/ \(.*\)$/, ' : ouvrez sa fiche, « Trouver le cours ».')
+        : e);
 const accName = id => S.accounts.find(a => a.id === id)?.name ?? '?';
 const catName = id => S.categories.find(c => c.id === id)?.name ?? '';
 const opts = (items, sel, empty) => (empty != null ? `<option value="">${empty}</option>` : '')
@@ -40,14 +46,14 @@ const catOpts = sel => opts(S.categories.map(c => [c.id, c.name]), sel, '— cat
 const row = (label, c, cls = '') => `<div class="row ${cls}"><span>${label}</span>${money(c)}</div>`;
 const card = (title, body, cls = '') => `<section class="card ${cls}"><h2>${title}</h2>${body}</section>`;
 const empty = t => `<div class="muted">${t}</div>`;
-const monthBar = () => `<div class="grid2" style="margin-bottom:12px"><input type="month" value="${view.month}" data-change="month" aria-label="Mois">`
-  + `<select data-change="account" aria-label="Filtrer par compte">${accOpts(view.account, 'Tous les comptes')}</select></div>`;
+const monthBar = (withAccount = true) => `<div class="grid2" style="margin-bottom:12px"><input type="month" value="${view.month}" data-change="month" aria-label="Mois">`
+  + (withAccount ? `<select data-change="account" aria-label="Filtrer par compte">${accOpts(view.account, 'Tous les comptes')}</select>` : '') + '</div>';
 const btn = (act, id, text, cls = 'small ghost') => `<button class="${cls}" data-act="${act}" data-id="${esc(id)}">${text}</button>`;
 // collapsible section; stays open across re-renders once the user opened it
 const fold = (key, title, body, open) => `<details class="card fold" data-fold="${key}"${open || view.open.has(key) ? ' open' : ''}><summary>${title}</summary>${body}</details>`;
 
 function opItem(o) {
-  const tags = [o.planned && 'prévue', o.plannedId && 'rapprochée', o.transferId && 'virement interne', o.envelopeId && 'achat bourse', o.kind === 'refund' && 'remboursement'].filter(Boolean);
+  const tags = [o.planned && 'à venir', o.plannedId && 'prévu ✓', o.transferId && 'virement interne', o.envelopeId && 'achat bourse', o.kind === 'refund' && 'remboursement'].filter(Boolean);
   const act = o.transferId ? btn('unlink', o.transferId, 'Délier') + btn('del', o.id, 'Suppr.', 'small danger')
     : o.envelopeId ? btn('del', o.id, 'Suppr.', 'small danger') : btn('edit', o.id, 'Modifier');
   return `<div class="op"><div class="l">${esc(o.label || B.KINDS[o.kind])}${tags.map(t => `<span class="tag">${t}</span>`).join('')}`
@@ -64,75 +70,62 @@ const onboarding = () => card('Bienvenue', empty('Aucun compte pour l’instant.
 // ---- views ----
 const views = {
   dash() {
-    const m = view.month, st = B.monthStats(S, m), al = B.alerts(S, m), stale = B.staleAccounts(S, today()), up = B.upcoming(S, m);
-    const liquid = S.accounts.filter(a => a.liquid);
-    const cats = B.categorySpend(S, m, view.account).filter(c => c.spent || c.cap);
-    return monthBar()
-      + `<section class="card hero"><div class="muted">Dépensable ce mois</div><div class="big">${eur(st.spendable)}</div>`
-      + (st.shortfall ? `<div class="bad">Manque : ${eur(st.shortfall)}</div>` : '') + `<div class="muted">Reste prévu − réserve − bourse</div></section>`
-      + (al.length ? card('Alertes', al.map(a => `<div class="row"><span class="${a.pct >= 100 ? 'bad' : 'warn'}">${esc(a.label)} : seuil ${a.pct} % atteint (${eur(a.spent)} / ${eur(a.cap)})</span>${btn('dismiss', a.id, 'OK')}</div>`).join('')) : '')
-      + card('Mois', row('Reste à date', st.toDate, 'total') + row('Reste prévu fin de mois', st.forecast, 'total')
-        + `<details style="margin-top:6px"><summary class="muted">Détail du calcul</summary>`
-        + row('Revenus encaissés', st.income) + row('Dépenses payées', -st.spent) + row('Revenus attendus', st.expectedIncome) + row('Dépenses attendues', -st.expectedSpent)
-        + row('Réserve mensuelle', -st.reserve) + row('Enveloppes bourse', -st.stock) + '</details>')
-      + card('Bilan de fin de mois', row('Résultat réel (encaissé − payé)', st.toDate, 'total') + row('Transféré vers l’épargne (net des retraits)', st.savedTransfer)
-        + empty('La réserve prévue n’est pas comptée comme épargne transférée.'))
-      + card('Liquidités', (liquid.map(a => row(`${esc(a.name)} <span class="muted">${esc(a.institution)}</span>`, B.balance(S, a))).join('')
-        + row('Total', liquid.reduce((t, a) => t + B.balance(S, a), 0), 'total')))
-      + card('Dépenses par catégorie' + (view.account ? ` · ${esc(accName(view.account))}` : ''),
-        (!view.account && S.settings.globalCap ? bar('Total du mois', st.spent, S.settings.globalCap) : '')
-        + (cats.map(c => bar(c.name, c.spent, c.cap)).join('') || empty('Aucune dépense.')))
-      + card('Prochaines échéances', up.map(opItem).join('') || empty('Rien de prévu.'))
-      + fold('fresh', `Fraîcheur des données${stale.length ? ` · <span class="warn">${stale.length} compte(s) à mettre à jour</span>` : ''}`, `<div class="row"><span>Dernier import</span><span>${S.lastImport ? `${S.lastImport.date} · ${esc(accName(S.lastImport.accountId))} (${S.lastImport.count})` : 'aucun'}</span></div>`
-        + (stale.map(x => `<div class="row"><span class="warn">${esc(x.a.name)}</span><span class="warn">${x.last ? 'dernière opération ' + x.last : 'aucune opération'}</span></div>`).join('')
-          || `<div class="muted good">Tous les comptes ont une opération de moins de 30 jours.</div>`));
+    const m = view.month, st = B.monthStats(S, m), al = B.alerts(S, m), up = B.upcoming(S, m), stale = B.staleAccounts(S, today());
+    const thisMonth = m === B.monthOf(today());
+    const accounts = (title, list) => (list.length ? `<div class="muted" style="margin-top:8px">${title}</div>`
+      + list.map(a => row(`${esc(a.name)} <span class="muted">${esc(a.institution)}</span>`, B.balance(S, a))).join('') : '');
+    const cats = B.categorySpend(S, m).filter(c => c.spent || c.cap);
+    const after = [st.expectedSpent && 'ce qui reste à payer', st.reserve && `votre épargne de côté (${eur(st.reserve)})`, st.stock && `votre budget bourse (${eur(st.stock)})`].filter(Boolean);
+    return monthBar(false)
+      + `<section class="card hero"><div class="muted">Il vous reste à dépenser ${thisMonth ? 'ce mois-ci' : `en ${m}`}</div><div class="big">${eur(st.spendable)}</div>`
+      + (st.shortfall ? `<div class="bad">Il manque ${eur(st.shortfall)} pour couvrir ce qui est prévu</div>` : '')
+      + (after.length ? `<div class="muted">après ${after.join(', ')}</div>` : '') + '</section>'
+      + (al.length ? card('Alertes', al.map(a => `<div class="row"><span class="${a.pct >= 100 ? 'bad' : 'warn'}">${esc(a.label)} : ${a.pct} % du plafond (${eur(a.spent)} / ${eur(a.cap)})</span>${btn('dismiss', a.id, 'OK')}</div>`).join('')) : '')
+      + card('Ce mois-ci', row('Entrées reçues', st.income) + row('Sorties payées', -st.spent)
+        + (st.expectedSpent ? row('Encore à payer', -st.expectedSpent) : '') + (st.expectedIncome ? row('Encore à recevoir', st.expectedIncome) : '')
+        + row('Solde du mois (entrées − sorties)', st.toDate, 'total') + (st.savedTransfer ? row('Mis sur l’épargne', st.savedTransfer) : '')
+        + `<div style="margin-top:6px">${btn('goOps', '', 'Voir le détail des mouvements →', 'small ghost')}</div>`)
+      + card(`À venir${up.length ? ` · ${up.length}` : ''}`, up.map(o => `<div class="op"><div class="l">${esc(o.label || catName(o.categoryId) || B.KINDS[o.kind])}`
+        + `<div class="muted">${o.date} · ${esc(accName(o.accountId))}</div></div><div class="r">${money(o.amount)}`
+        + `<div class="actions">${btn('paid', o.id, o.amount > 0 ? 'Reçu ✓' : 'Payé ✓', 'small')}</div></div></div>`).join('')
+        || empty('Rien à venir. Vos échéances récurrentes (loyer, abonnements…) se règlent dans Réglages.'))
+      + card('Mes comptes', (accounts('Comptes courants', S.accounts.filter(a => a.liquid)) + accounts('Épargne', S.accounts.filter(a => a.savings))
+        + accounts('Espèces chez les courtiers', S.accounts.filter(a => !a.liquid && !a.savings))) || empty('Aucun compte : créez-en dans Réglages.'))
+      + (cats.length ? card('Dépenses par catégorie', (S.settings.globalCap ? bar('Total du mois', st.spent, S.settings.globalCap) : '') + cats.map(c => bar(c.name, c.spent, c.cap)).join('')) : '')
+      + (stale.length ? fold('fresh', `<span class="warn">${stale.length} compte(s) sans mouvement depuis 30 jours</span>`,
+        stale.map(x => row(esc(x.a.name), B.balance(S, x.a))).join('') + empty('Importez un relevé ou ajoutez les mouvements récents.')) : '');
   },
 
   ops() {
     const e = view.edit && S.ops.find(o => o.id === view.edit);
     const list = S.ops.filter(o => B.monthOf(o.date) === view.month && (!view.account || o.accountId === view.account)).sort((a, b) => b.date.localeCompare(a.date));
     const pairs = B.transferCandidates(S);
+    const days = [...new Set(list.map(o => o.date))];
     return monthBar()
-      + (pairs.length ? card('Virements détectés', pairs.map(([o, i]) => `<div class="op"><div class="l">${esc(o.label)} → ${esc(i.label)}<div class="muted">${o.date} ${esc(accName(o.accountId))} → ${i.date} ${esc(accName(i.accountId))}</div></div>`
-        + `<div class="r">${eur(i.amount)}<div class="actions">${btn('link', `${o.id}|${i.id}`, 'Lier', 'small')}${btn('notLink', `${o.id}|${i.id}`, 'Ignorer')}</div></div></div>`).join('')) : '')
-      + fold('addOp', e ? 'Modifier l’opération' : '＋ Nouvelle opération', `<form data-form="op">
-        <div class="grid2"><select name="kind">${opts([['expense', 'Dépense'], ['income', 'Revenu'], ['refund', 'Remboursement']], e?.kind ?? 'expense')}</select>
+      + (pairs.length ? card('Virements entre vos comptes ?', empty('Ces deux mouvements semblent être un même virement. Liez-les pour qu’ils ne comptent ni en entrée ni en sortie.')
+        + pairs.map(([o, i]) => `<div class="op"><div class="l">${esc(o.label)} → ${esc(i.label)}<div class="muted">${o.date} ${esc(accName(o.accountId))} → ${esc(accName(i.accountId))}</div></div>`
+          + `<div class="r">${eur(i.amount)}<div class="actions">${btn('link', `${o.id}|${i.id}`, 'Lier', 'small')}${btn('notLink', `${o.id}|${i.id}`, 'Non')}</div></div></div>`).join('')) : '')
+      + fold('addOp', e ? 'Modifier le mouvement' : '＋ Ajouter une entrée ou une sortie', `<form data-form="op">
+        <div class="grid2"><select name="kind" aria-label="Type">${opts([['expense', 'Sortie'], ['income', 'Entrée'], ['refund', 'Remboursement']], e?.kind ?? 'expense')}</select>
         <input name="amount" inputmode="decimal" placeholder="Montant €" required value="${e ? euros(Math.abs(e.amount)) : ''}"></div>
-        <div class="grid2"><select name="accountId">${accOpts(e?.accountId ?? view.account)}</select><input type="date" name="date" required value="${e?.date ?? today()}"></div>
-        <select name="categoryId">${catOpts(e?.categoryId)}</select>
-        <input name="label" placeholder="Libellé" value="${esc(e?.label)}">
-        <label class="chk"><input type="checkbox" name="planned"${e?.planned ? ' checked' : ''}> Prévue (pas encore payée ou encaissée)</label>
+        <div class="grid2"><select name="accountId" aria-label="Compte">${accOpts(e?.accountId ?? view.account)}</select><input type="date" name="date" required value="${e?.date ?? today()}"></div>
+        <select name="categoryId" aria-label="Catégorie">${catOpts(e?.categoryId)}</select>
+        <input name="label" placeholder="Libellé (ex. Courses)" value="${esc(e?.label)}">
+        <label class="chk"><input type="checkbox" name="planned"${e?.planned ? ' checked' : ''}> Pas encore payé (à venir)</label>
         <button>${e ? 'Enregistrer' : 'Ajouter'}</button>
         ${e ? `<div class="grid2"><button type="button" class="ghost" data-act="cancel">Annuler</button>${btn('del', e.id, 'Supprimer', 'danger')}</div>` : ''}</form>`, !!e)
-      + fold('transfer', 'Virement entre comptes', `<form data-form="transfer"><div class="grid2"><select name="from" aria-label="De">${accOpts()}</select><select name="to" aria-label="Vers">${accOpts(S.accounts[1]?.id)}</select></div>
+      + card(`Mouvements · ${list.length}`, days.map(d => `<div class="muted" style="margin-top:8px">${new Date(d + 'T12:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' })}</div>`
+        + list.filter(o => o.date === d).map(opItem).join('')).join('') || empty('Aucun mouvement ce mois.'))
+      + fold('transfer', 'Virement entre mes comptes', `<form data-form="transfer"><div class="grid2"><select name="from" aria-label="De">${accOpts()}</select><select name="to" aria-label="Vers">${accOpts(S.accounts[1]?.id)}</select></div>
         <div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant €" required><input type="date" name="date" required value="${today()}"></div>
-        <button>Enregistrer le virement</button>${empty('Exclu des revenus et des dépenses du foyer.')}</form>`)
-      + fold('importOps', 'Importer un relevé bancaire (CSV)', importBlock(), !!view.preview)
-      + card(`Opérations · ${list.length}`, list.map(opItem).join('') || empty('Aucune opération ce mois.'));
-  },
-
-  plan() {
-    const m = view.month, up = B.upcoming(S, m), matched = S.ops.filter(o => o.plannedId && B.monthOf(o.date) === m);
-    return monthBar()
-      + card('À rapprocher', up.map(p => {
-        const c = B.matchCandidates(S, p);
-        return opItem(p) + (c.length ? `<form data-form="match" class="grid2" style="grid-template-columns:1fr auto;margin:4px 0 8px"><input type="hidden" name="plannedId" value="${p.id}">`
-          + `<select name="realId" aria-label="Opération réelle">${opts(c.map(o => [o.id, `${o.date} ${o.label} ${eur(o.amount)}`]))}</select><button class="small">Rapprocher</button></form>` : '');
-      }).join('') || empty('Aucune opération prévue en attente.'))
-      + fold('matched', `Rapprochées · ${matched.length}`, matched.map(o => `<div class="op"><div class="l">${esc(o.label)} ↔ ${esc(S.ops.find(x => x.id === o.plannedId)?.label)}<div class="muted">${o.date}</div></div>`
-        + `<div class="r">${money(o.amount)}<div class="actions">${btn('unmatch', o.plannedId, 'Annuler')}</div></div></div>`).join('') || empty('Aucune.'))
-      + card('Échéances récurrentes (mensuelles)', S.recurring.map(r => `<div class="op"><div class="l">${esc(r.label)}<div class="muted">le ${r.day} · ${esc(accName(r.accountId))}${r.categoryId ? ' · ' + esc(catName(r.categoryId)) : ''}</div></div>`
-        + `<div class="r">${money(B.signed(r.kind, r.cents))}<div class="actions">${btn('delRec', r.id, 'Suppr.', 'small danger')}</div></div></div>`).join('')
-        + `<button data-act="gen" style="margin:8px 0">Générer les échéances de ${view.month}</button>`)
-      + fold('rec', '＋ Nouvelle échéance récurrente', `
-        <form data-form="rec"><div class="grid2"><select name="kind">${opts([['expense', 'Dépense'], ['income', 'Revenu']], 'expense')}</select><input name="amount" inputmode="decimal" placeholder="Montant €" required></div>
-        <div class="grid2"><select name="accountId">${accOpts()}</select><input name="day" type="number" min="1" max="31" placeholder="Jour du mois" required></div>
-        <select name="categoryId">${catOpts()}</select><input name="label" placeholder="Libellé (loyer, abonnement…)" required><button class="ghost">Ajouter une échéance</button></form>`);
+        <button>Enregistrer le virement</button>${empty('Ne compte ni en entrée ni en sortie.')}</form>`)
+      + fold('importOps', 'Importer un relevé bancaire (CSV)', importBlock(), !!view.preview);
   },
 
   stock() {
     const t = today(), lines = B.valuation(S, t), mk = S.settings.market, sug = B.suggestions(S, t), pf = S.settings.profile;
-    const ready = mk.enabled && mk.avKey;
+    const ready = mk.enabled && (mk.proxyUrl || mk.avKey), lr = S.lastRefresh;
+    const held = sug.filter(x => x.held), noAdvice = held.filter(x => x.suspended).length;
     const envs = S.envelopes.filter(e => e.month === view.month), open = envs.filter(e => B.envelopeLeft(S, e) > 0);
     const left = envs.reduce((a, e) => a + B.envelopeLeft(S, e), 0);
     const brokers = S.accounts.filter(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
@@ -184,24 +177,35 @@ const views = {
 
     const searchCard = () => {
       const sr = view.search, target = sr?.forIsin && inst(sr.forIsin);
-      return card(target ? `Cotation de ${esc(target.name)} ${btn('cancelSearch', '', 'Annuler')}` : 'Ajouter un titre',
+      return (target ? (b => card(`Cotation de ${esc(target.name)} ${btn('cancelSearch', '', 'Annuler')}`, b)) : (b => fold('add', 'Suivre un autre titre', b, !!sr)))(
         `<form data-form="search" class="grid2" style="grid-template-columns:1fr auto"><input name="q" placeholder="Nom ou ticker : MSCI World, TotalEnergies…" value="${esc(sr?.q)}" required><button class="small">Chercher</button></form>`
         + (sr ? sr.results.map((r, k) => `<div class="op"><div class="l">${esc(r.name)}<div class="muted">${esc(r.symbol)} · ${esc(r.type)} · ${esc(r.region)} · ${esc(r.currency)}</div></div>`
           + `<div class="r">${btn('pick', k, target ? 'Choisir' : 'Suivre', 'small')}</div></div>`).join('') || empty('Aucun résultat : essayez le ticker ou un autre nom.') : '')
-        + (ready ? '' : empty('La recherche utilise votre clé Alpha Vantage : renseignez-la dans « Clés et données envoyées » plus bas.'))
+        + (ready ? '' : empty('La recherche a besoin du service de cours : voir « Réglages bourse » plus bas.'))
 );
     };
 
     return (view.inst ? sheet(view.inst) : '')
       + (view.search?.forIsin ? searchCard() : '')
-      + (ready ? `<div style="margin-bottom:12px">${btn('refreshAll', '', 'Actualiser et chercher des idées', '')}</div>` : '')
+      + `<section class="card"><div class="row" style="border:0;align-items:center"><span>${!ready ? '<b class="warn">Service de cours à configurer</b>'
+          : noAdvice ? `<b class="warn">${noAdvice} titre(s) sans avis</b>` : held.length ? '<b class="good">Tous vos titres ont un avis ✓</b>' : '<b>Bourse</b>'}</span>`
+        + (ready ? btn('refreshAll', '', 'Actualiser', 'small') : '') + '</div>'
+        + (!ready ? empty('Ouvrez « Réglages bourse » en bas de page : 5 minutes de configuration, une seule fois.') : '')
+        + (lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
+        + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '')
+        + `<details><summary class="muted">Comment l’outil décide</summary><div class="muted">
+          Pour chaque titre, il additionne des points : <b>+1/−1</b> si le cours est au-dessus/en dessous de sa moyenne des 50 derniers jours,
+          <b>±0,5</b> pour une forte hausse/baisse sur 3 mois, <b>±1</b> selon le ton des actualités des 14 derniers jours,
+          <b>±1 ou 2</b> si le titre s’écarte de la part que vous visez, <b>−2</b> si votre perte maximale ou votre stop est atteint.
+          Total ≥ 2 : Acheter / Renforcer. Total ≤ −2 : Alléger ; ≤ −3 : Vendre. Sinon : Conserver / Attendre.
+          Sans cours récent ou avec un cours incohérent, il ne donne pas d’avis (« Suspendu »).</div></details></section>`
       + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (plus bas).'))
         + (lines.length ? row('Valeur des positions', total(lines), 'total') : '')
         + (missing ? `<div class="warn">${missing} ligne(s) sans cours, exclue(s) du total.</div>` : '')
         + empty('Touchez un titre pour voir pourquoi : Renforcer, Conserver, Alléger ou Vendre.'))
       + card('Idées d’achat', (sug.filter(x => !x.held).sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || b.score - a.score).map(titleRow).join('')
-          || empty(ready && mk.newsKey ? 'Appuyez sur « Actualiser et chercher des idées ».' : 'Renseignez vos deux clés (« Clés et données envoyées » plus bas) pour que l’outil cherche des idées.'))
-        + empty(`Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif (Marketaux), vérifie la tendance de leur cours (Alpha Vantage) et garde les ${5} meilleures. L’enveloppe du mois va au meilleur signal « Acheter ».`)
+          || empty(ready && mk.newsKey ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (« Réglages bourse » plus bas).'))
+        + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
         + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
       + (view.search?.forIsin ? '' : searchCard())
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
@@ -238,10 +242,19 @@ const views = {
         <label>Frais par ordre (€)<input name="fee" inputmode="decimal" value="${euros(pf.fee)}"></label></div>
         <label>Coût de change hors EUR (%)<input name="fxPct" inputmode="decimal" value="${String(pf.fxPct).replace('.', ',')}"></label></details>
         <button class="ghost">Enregistrer</button>${empty('Laisser une part vide : pas de cible pour ce titre. Le stop suiveur ne joue que sous 5 ans d’horizon.')}</form>`)
-      + fold('keys', 'Clés et données envoyées', `<form data-form="market"><label class="chk"><input type="checkbox" name="enabled"${mk.enabled ? ' checked' : ''}> Activer les données en ligne</label>
-        <input type="password" name="avKey" placeholder="Clé Alpha Vantage (cours, recherche)" value="${esc(mk.avKey)}" autocomplete="off">
-        <input type="password" name="newsKey" placeholder="Clé Marketaux (actualités)" value="${esc(mk.newsKey)}" autocomplete="off"><button class="ghost">Enregistrer</button></form>
-        ${empty('Envoyés : vos clés, votre adresse IP, les noms cherchés et les symboles suivis (alphavantage.co, marketaux.com), les devises (frankfurter.dev). Jamais : quantités, montants, comptes, opérations. Au plus un appel par titre et par jour.')}
+      + fold('keys', 'Réglages bourse (service de cours, clés)', `<form data-form="market"><label class="chk"><input type="checkbox" name="enabled"${mk.enabled ? ' checked' : ''}> Activer les données en ligne</label>
+        <label>Adresse de votre service de cours<input name="proxyUrl" type="url" placeholder="https://prix-budget.xxx.workers.dev" value="${esc(mk.proxyUrl)}" autocomplete="off"></label>
+        <label>Mot de passe du service<input type="password" name="proxyKey" value="${esc(mk.proxyKey)}" autocomplete="off"></label>
+        <label>Clé Marketaux (actualités et idées)<input type="password" name="newsKey" value="${esc(mk.newsKey)}" autocomplete="off"></label>
+        <details><summary class="muted">Sans service de cours</summary><label>Clé Alpha Vantage (25 cours par jour)<input type="password" name="avKey" value="${esc(mk.avKey)}" autocomplete="off"></label></details>
+        <div class="grid2"><button class="ghost">Enregistrer</button>${btn('testKeys', '', 'Tester', 'ghost')}</div></form>
+        <details style="margin-top:8px"><summary><b>Créer le service de cours (5 min, gratuit)</b></summary><div class="muted">
+          1. Créez un compte sur <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener noreferrer">dash.cloudflare.com</a>.<br>
+          2. « Workers et Pages » → « Créer » → « Hello World » → donnez-lui un nom (ex. prix-budget) → « Déployer ».<br>
+          3. « Modifier le code » : remplacez tout par le contenu de <a href="cloudflare-worker.js" target="_blank">cloudflare-worker.js</a> → « Déployer ».<br>
+          4. « Paramètres » → « Variables et secrets » → « Ajouter » : type Secret, nom <b>KEY</b>, valeur = un mot de passe de votre choix.<br>
+          5. Ici : collez l’adresse du service (…workers.dev) et ce mot de passe, puis « Enregistrer » et « Tester ».</div></details>
+        ${empty('Envoyés : à votre service, les ISIN et symboles suivis ; à Marketaux, votre clé et les noms suivis. Jamais : quantités, montants, comptes, opérations.')}
         ${S.requestLog.slice(0, 10).map(r => `<div class="muted">${r.at.slice(0, 16).replace('T', ' ')} · ${esc(r.host)} · ${esc(r.symbols.join(', '))}</div>`).join('')}`, !ready)
       + (S.instruments.length ? fold('manual', 'Saisir un cours à la main', `<form data-form="quote"><select name="isin">${instOpts(S.instruments)}</select>
         <div class="grid2"><input name="price" inputmode="decimal" placeholder="Cours (devise de cotation)" required><input type="date" name="date" value="${t}" required></div><button class="ghost">Enregistrer le cours</button></form>`) : '');
@@ -273,6 +286,13 @@ const views = {
           : empty('Sur iPhone : ajoutez d’abord l’app à l’écran d’accueil (iOS 16.4 ou plus), puis ouvrez-la depuis l’icône.'))
         + empty('Vous êtes prévenu quand un avis change (Acheter, Renforcer, Alléger, Vendre, À examiner), quand un plafond de catégorie est atteint, et quand le dépensable passe sous le seuil choisi dans « Réserve, plafond global et alertes ».')
         + empty('Sans serveur, les avis sont calculés quand l’app est ouverte ou actualisée, pas pendant qu’elle est fermée.'))
+      + fold('rec', `Échéances récurrentes (loyer, abonnements…)${S.recurring.length ? ` · ${S.recurring.length}` : ''}`,
+        S.recurring.map(r => `<div class="op"><div class="l">${esc(r.label)}<div class="muted">le ${r.day} de chaque mois · ${esc(accName(r.accountId))}</div></div>`
+          + `<div class="r">${money(B.signed(r.kind, r.cents))}<div class="actions">${btn('delRec', r.id, 'Suppr.', 'small danger')}</div></div></div>`).join('')
+        + `<form data-form="rec" style="margin-top:8px"><div class="grid2"><select name="kind">${opts([['expense', 'Sortie'], ['income', 'Entrée']], 'expense')}</select><input name="amount" inputmode="decimal" placeholder="Montant €" required></div>
+        <div class="grid2"><select name="accountId">${accOpts()}</select><input name="day" type="number" min="1" max="31" placeholder="Jour du mois" required></div>
+        <select name="categoryId">${catOpts()}</select><input name="label" placeholder="Libellé (loyer, abonnement…)" required><button class="ghost">Ajouter</button></form>`
+        + empty('Elles apparaissent chaque mois dans « À venir » sur l’Accueil, avec un bouton « Payé ✓ ».'))
       + fold('cats', 'Catégories et plafonds mensuels', S.categories.map(catForm).join('') + catForm(null))
       + fold('backup', 'Sauvegarde et export', `<form data-form="backup"><input type="password" name="pw" placeholder="Mot de passe (8 caractères min.)" autocomplete="new-password" required>
         <button>Télécharger une sauvegarde chiffrée</button></form><br>
@@ -343,7 +363,8 @@ const actions = {
   notLink: id => { for (const o of S.ops) if (pair(id).includes(o.id)) o.notTransfer = true; },
   dismiss: id => S.dismissedAlerts.push(id),
   unmatch: id => B.unmatch(S, id),
-  gen: () => alert(`${B.generateRecurring(S, view.month)} échéance(s) ajoutée(s).`),
+  paid: id => B.markPaid(S, id, today()),
+  goOps: () => { view.tab = 'ops'; scrollTo(0, 0); },
   delRec: id => { S.recurring = S.recurring.filter(r => r.id !== id); },
   release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
@@ -354,7 +375,14 @@ const actions = {
       errs.push(...await refreshNews(S, t));
       try { errs.push(...await discover(S, t)); } catch (e) { errs.push(`Recherche d’idées : ${e.message}`); }
     }
-    alert(errs.length ? errs.join('\n') : 'Cours, actualités et idées à jour.');
+    S.lastRefresh = { at: new Date().toISOString(), errors: [...new Set(errs.map(plain))] }; // shown on the Bourse screen, no pop-up
+  },
+  testKeys: async () => {
+    const m = S.settings.market, out = [];
+    if (!m.enabled) throw new Error('Cochez d’abord « Activer les données en ligne », puis Enregistrer.');
+    if (m.proxyUrl) try { await searchSymbols(S, 'TotalEnergies'); out.push('Service de cours : OK ✓'); } catch (e) { out.push(plain(e.message)); }
+    if (m.newsKey) try { await checkNewsKey(S); out.push('Clé Marketaux : OK ✓'); } catch (e) { out.push(plain(e.message)); }
+    alert(out.join('\n') || 'Renseignez l’adresse du service et la clé Marketaux, puis Enregistrer.');
   },
   findSymbol: async isin => { const i = S.instruments.find(x => x.isin === isin); view.search = { q: i.name, forIsin: isin, results: await searchSymbols(S, i.name) }; scrollTo(0, 0); },
   cancelSearch: () => { view.search = null; },
@@ -367,8 +395,10 @@ const actions = {
   testNotif: async () => (await navigator.serviceWorker.ready).showNotification('Budget', { body: 'Les notifications fonctionnent.', icon: 'apple-touch-icon.png' }),
   pick: k => {
     const r = view.search.results[+k], target = S.instruments.find(x => x.isin === view.search.forIsin);
-    if (target) { Object.assign(target, { symbol: r.symbol, currency: r.currency, type: r.type, place: r.region }); delete S.quotes[target.isin]; delete S.history[target.isin]; }
-    else view.inst = B.saveInstrument(S, { symbol: r.symbol, name: r.name, currency: r.currency, type: r.type, place: r.region });
+    // with the price service, the result is a Yahoo listing; its real currency arrives with the first price
+    const ysym = S.settings.market.proxyUrl ? r.symbol : undefined, currency = r.currency || target?.currency || 'EUR';
+    if (target) { Object.assign(target, { symbol: r.symbol, currency, type: r.type, place: r.region, ysym }); delete S.quotes[target.isin]; delete S.history[target.isin]; }
+    else { view.inst = B.saveInstrument(S, { symbol: r.symbol, name: r.name, currency, type: r.type, place: r.region }); S.instruments.find(i => i.isin === view.inst).ysym = ysym; }
     view.search = null;
   },
   delInst: isin => {
@@ -426,7 +456,12 @@ const forms = {
     S.settings.profile = { horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
   },
   quote: f => B.setQuote(S, f.isin, decimal(f.price), f.date),
-  market: f => { S.settings.market = { enabled: f.enabled === 'on', avKey: f.avKey.trim(), newsKey: f.newsKey.trim() }; },
+  market: f => {
+    const proxyUrl = f.proxyUrl.trim();
+    if (proxyUrl && !/^https:\/\//.test(proxyUrl)) throw new Error('L’adresse du service doit commencer par https://');
+    if (proxyUrl !== S.settings.market.proxyUrl) for (const i of S.instruments) delete i.ysym; // listings are looked up again by the new service
+    S.settings.market = { enabled: f.enabled === 'on', proxyUrl, proxyKey: f.proxyKey.trim(), avKey: f.avKey.trim(), newsKey: f.newsKey.trim() };
+  },
   holding: f => B.addHolding(S, f.accountId, f.isin, f.date, decimal(f.qty), parseEur(f.cost)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {
@@ -466,6 +501,8 @@ const forms = {
 
 // ---- wiring ----
 function render() {
+  // recurring items of the month shown (and later ones) appear on their own: no « générer » button
+  if (view.month >= B.monthOf(today()) && B.generateRecurring(S, view.month)) save();
   app.innerHTML = !S.accounts.length && view.tab !== 'settings' ? onboarding() : views[view.tab]();
   for (const b of document.querySelectorAll('nav button')) b.toggleAttribute('aria-current', b.dataset.tab === view.tab);
   document.querySelector(`nav [data-tab="${view.tab}"]`).setAttribute('aria-current', 'page');
@@ -520,5 +557,7 @@ navigator.storage?.persist?.(); // ask the browser not to evict local data
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 const startTab = new URLSearchParams(location.search).get('tab'); // set by a tapped notification
 if (views[startTab]) view.tab = startTab;
+// payments entered before automatic matching existed: settle the planned items they correspond to
+if (S.ops.filter(o => B.monthOf(o.date) >= B.monthOf(today()) && !o.planned).map(o => B.autoMatch(S, o)).some(Boolean)) save();
 render();
 notify();

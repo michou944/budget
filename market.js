@@ -11,13 +11,51 @@ export const AV_PER_DAY = 25, SCAN_CALLS = 5;
 const localDay = () => new Date().toLocaleDateString('sv-SE');
 const avUsed = s => (s.avCalls?.date === localDay() ? s.avCalls.n : 0);
 
-async function get(s, url, symbols, fetchFn) {
+async function get(s, url, symbols, fetchFn, init) {
   const host = new URL(url).host;
   s.requestLog = [{ at: new Date().toISOString(), host, symbols }, ...s.requestLog].slice(0, 50); // never logs the key
   if (host.includes('alphavantage')) s.avCalls = { date: localDay(), n: avUsed(s) + 1 };
-  const r = await fetchFn(url);
+  const r = await fetchFn(url, init);
   if (!r.ok) throw new Error(`${host} : HTTP ${r.status}`);
   return r.json();
+}
+
+// ---- the user's own price service (Cloudflare Worker relaying Yahoo Finance and OpenFIGI, see cloudflare-worker.js) ----
+
+const proxyOn = s => !!(s.settings.market.enabled && s.settings.market.proxyUrl);
+async function proxyGet(s, path, label, fetchFn) {
+  const m = s.settings.market;
+  try { return await get(s, m.proxyUrl.replace(/\/+$/, '') + path, label, fetchFn, { headers: { 'x-key': m.proxyKey ?? '' } }); }
+  catch (e) { throw new Error(/HTTP 401/.test(e.message) ? 'Service de cours : mot de passe refusé' : /HTTP 404/.test(e.message) ? 'cotation introuvable' : `Service de cours : ${e.message}`); }
+}
+
+// Exchange of the ISIN's home market (OpenFIGI codes) and the Yahoo suffix of each exchange.
+const HOME = { US: 'US', FR: 'FP', DE: 'GY', NL: 'NA', IT: 'IM', ES: 'SM', BE: 'BB', JP: 'JT', GB: 'LN' };
+const YAHOO_SUFFIX = { US: '', FP: '.PA', GY: '.DE', GR: '.F', GF: '.F', NA: '.AS', IM: '.MI', SM: '.MC', BB: '.BR', JT: '.T', LN: '.L' };
+export function pickFromFigi(rows, isin) {
+  for (const ex of [HOME[isin.slice(0, 2)], 'FP', 'GY', 'GR', 'NA', 'IM', 'US', 'JT', 'LN'].filter(Boolean)) {
+    const r = rows.find(x => x.exchCode === ex);
+    if (r) return r.ticker.replace(/[ /]/g, '-') + YAHOO_SUFFIX[ex];
+  }
+  return null;
+}
+
+// Yahoo symbol of a title: found once from its ISIN (Yahoo, then OpenFIGI, which knows US ISINs), then kept.
+async function yahooSymbol(s, i, fetchFn) {
+  if (i.ysym) return i.ysym;
+  let sym = null;
+  if (/^[A-Z]{2}[A-Z0-9]{9}\d$/.test(i.isin)) {
+    const quotes = await proxyGet(s, `/search?q=${i.isin}`, [i.isin], fetchFn);
+    sym = quotes[0]?.symbol ?? pickFromFigi(await proxyGet(s, `/figi?isin=${i.isin}`, [i.isin], fetchFn), i.isin);
+  } else if (i.symbol) sym = i.symbol.replace(/\.PAR$/, '.PA').replace(/\.DEX$/, '.DE').replace(/\.AMS$/, '.AS');
+  if (sym) i.ysym = sym;
+  return sym;
+}
+
+// 6 months of daily closes in the listing's own currency (London quotes in pence are turned into pounds).
+async function proxyHistory(s, sym, fetchFn) {
+  const c = await proxyGet(s, `/chart?s=${enc(sym)}`, [sym], fetchFn);
+  return c.currency === 'GBp' ? { currency: 'GBP', closes: c.closes.map(([d, p]) => [d, p / 100]) } : { currency: String(c.currency).toUpperCase(), closes: c.closes };
 }
 
 const needKey = (m, key) => {
@@ -34,8 +72,12 @@ function byImportance(s, today) {
 
 const dailyCloses = j => Object.entries(j['Time Series (Daily)'] ?? {}).map(([d, v]) => [d, Number(v['4. close'])]);
 
+// « Tester » button: one cheap call that fails with HTTP 401 when the Marketaux key is wrong.
+export const checkNewsKey = (s, fetchFn = fetch) => get(s, `${MX}/news/all?language=en&limit=1&api_token=${enc(s.settings.market.newsKey)}`, ['test de la clé'], fetchFn);
+
 // Finds titles by name or ticker (one Alpha Vantage call).
 export async function searchSymbols(s, query, fetchFn = fetch) {
+  if (proxyOn(s)) return (await proxyGet(s, `/search?q=${enc(query)}`, [query], fetchFn)).map(x => ({ symbol: x.symbol, name: x.name, type: x.type, region: x.exchange, currency: '' }));
   needKey(s.settings.market, 'avKey');
   const j = await get(s, `${AV}?function=SYMBOL_SEARCH&keywords=${enc(query)}&apikey=${enc(s.settings.market.avKey)}`, [query], fetchFn);
   if (j.Note || j.Information) throw new Error(`Alpha Vantage : ${j.Note || j.Information}`);
@@ -57,6 +99,19 @@ export async function refreshMarket(s, today, fetchFn = fetch) {
   const m = s.settings.market, errors = [];
   if (!m.enabled) throw new Error('Données de marché désactivées');
   await refreshFx(s, today, fetchFn, errors);
+  if (proxyOn(s)) { // own service: every title, every day, no quota
+    for (const i of byImportance(s, today).filter(i => s.quotes[i.isin]?.fetchedAt !== today)) {
+      try {
+        const sym = await yahooSymbol(s, i, fetchFn);
+        if (!sym) { errors.push(`${i.name} : cotation introuvable`); continue; }
+        const h = await proxyHistory(s, sym, fetchFn);
+        i.currency = h.currency;
+        setHistory(s, i.isin, h.closes, 'Yahoo (service perso)', today);
+      } catch (e) { errors.push(`${i.name} : ${e.message}`); if (/mot de passe/.test(e.message)) break; }
+    }
+    await refreshFx(s, today, fetchFn, errors); // a listing may have brought a new currency
+    return errors;
+  }
   if (!m.avKey) return [...errors, 'Clé Alpha Vantage manquante : cours non actualisés'];
   const todo = byImportance(s, today).filter(i => s.quotes[i.isin]?.fetchedAt !== today);
   for (const [k, i] of todo.entries()) {
@@ -106,8 +161,9 @@ export function toAv(symbol) {
 // whose price history is then fetched (Alpha Vantage). They become « idées » that the verdict engine judges
 // like any other title. Yesterday's ideas make way for today's, unless they were bought in the meantime.
 export async function discover(s, today, fetchFn = fetch) {
-  const m = s.settings.market;
-  needKey(m, 'avKey'); needKey(m, 'newsKey');
+  const m = s.settings.market, proxy = proxyOn(s);
+  if (!proxy) needKey(m, 'avKey');
+  needKey(m, 'newsKey');
   if (s.discovery?.date === today) return [];
   const week = new Date(Date.parse(today) - 7 * 864e5).toISOString().slice(0, 10);
   let trending, minDocs = 5;
@@ -121,7 +177,7 @@ export async function discover(s, today, fetchFn = fetch) {
   }
   const followed = new Set(s.instruments.filter(i => !i.auto).flatMap(i => [i.isin, i.symbol]));
   const picks = (trending ?? [])
-    .map(x => ({ ...toAv(String(x.key ?? '')), docs: x.total_documents, tone: x.sentiment_avg }))
+    .map(x => ({ ...toAv(String(x.key ?? '')), key: String(x.key ?? ''), docs: x.total_documents, tone: x.sentiment_avg }))
     .filter(x => x.symbol && x.tone >= 0.15 && x.docs >= minDocs && !followed.has(x.symbol))
     .sort((a, b) => b.docs * b.tone - a.docs * a.tone);
   const held = new Set(positions(s).map(p => p.isin));
@@ -129,14 +185,19 @@ export async function discover(s, today, fetchFn = fetch) {
   s.discovery = { date: today, items: {} };
   const errors = [];
   for (const x of picks) {
-    if (Object.keys(s.discovery.items).length >= SCAN_CALLS || avUsed(s) >= AV_PER_DAY) break;
-    let h;
-    try { h = await get(s, `${AV}?function=TIME_SERIES_DAILY&outputsize=compact&symbol=${enc(x.symbol)}&apikey=${enc(m.avKey)}`, [x.symbol], fetchFn); }
-    catch (e) { errors.push(`${x.symbol} : ${e.message}`); continue; }
-    if (!h['Time Series (Daily)']) { if (h.Note || h.Information) { errors.push(`Alpha Vantage : ${h.Note || h.Information}`); break; } continue; }
-    const id = saveInstrument(s, { symbol: x.symbol, name: x.symbol, currency: x.currency, type: 'Equity' });
-    s.instruments.find(i => i.isin === id).auto = true;
-    setHistory(s, id, dailyCloses(h), 'Alpha Vantage', today);
+    if (Object.keys(s.discovery.items).length >= SCAN_CALLS || (!proxy && avUsed(s) >= AV_PER_DAY)) break;
+    let closes, currency = x.currency;
+    try {
+      if (proxy) ({ closes, currency } = await proxyHistory(s, x.key, fetchFn)); // Marketaux and Yahoo share suffixes (.PA, .DE, .AS)
+      else {
+        const h = await get(s, `${AV}?function=TIME_SERIES_DAILY&outputsize=compact&symbol=${enc(x.symbol)}&apikey=${enc(m.avKey)}`, [x.symbol], fetchFn);
+        if (!h['Time Series (Daily)']) { if (h.Note || h.Information) { errors.push(`Alpha Vantage : ${h.Note || h.Information}`); break; } continue; }
+        closes = dailyCloses(h);
+      }
+    } catch (e) { errors.push(`${x.symbol} : ${e.message}`); continue; }
+    const id = saveInstrument(s, { symbol: x.symbol, name: x.symbol, currency, type: 'Equity' });
+    Object.assign(s.instruments.find(i => i.isin === id), { auto: true, ...(proxy && { ysym: x.key }) });
+    setHistory(s, id, closes, proxy ? 'Yahoo (service perso)' : 'Alpha Vantage', today);
     s.discovery.items[id] = { docs: x.docs, tone: x.tone, asOf: today };
   }
   // one call to put company names on the ideas

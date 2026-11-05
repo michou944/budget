@@ -106,7 +106,7 @@ export function saveOp(s, f, id) {
   if (!Number.isInteger(f.cents) || f.cents <= 0) throw new Error('Montant invalide');
   const fields = { accountId: f.accountId, date: f.date, kind: f.kind, amount: signed(f.kind, f.cents),
     categoryId: f.categoryId || null, label: (f.label || '').trim(), planned: !!f.planned };
-  if (!id) return s.ops.push({ id: uid(), ...fields });
+  if (!id) { const o = { id: uid(), ...fields }; s.ops.push(o); autoMatch(s, o); return o; }
   const o = s.ops.find(x => x.id === id);
   if (!o || o.transferId || o.envelopeId) throw new Error('Opération non modifiable ici');
   Object.assign(o, fields);
@@ -167,6 +167,26 @@ export function match(s, plannedId, realId) {
   r.plannedId = plannedId;
 }
 export const unmatch = unmatchPlanned;
+
+// A real operation that looks like a planned one settles it, so it is never counted twice: same month and
+// direction, same account or category, amount within 10 % (at least 5 €). The closest amount wins.
+export function autoMatch(s, real) {
+  if (real.planned || real.plannedId || !['income', 'expense', 'refund'].includes(real.kind)) return false;
+  const taken = new Set(s.ops.map(o => o.plannedId).filter(Boolean));
+  const p = s.ops.filter(x => x.planned && !taken.has(x.id) && x.kind === real.kind && monthOf(x.date) === monthOf(real.date)
+      && (x.accountId === real.accountId || (x.categoryId && x.categoryId === real.categoryId))
+      && Math.abs(x.amount - real.amount) <= Math.max(500, Math.abs(x.amount) * 0.1))
+    .sort((a, b) => Math.abs(a.amount - real.amount) - Math.abs(b.amount - real.amount))[0];
+  if (p) real.plannedId = p.id;
+  return !!p;
+}
+
+// « Payé ✓ » on an upcoming item: it becomes a real operation, dated today when paid in its own month.
+export function markPaid(s, id, today) {
+  const o = s.ops.find(x => x.id === id && x.planned);
+  if (!o) throw new Error('Échéance introuvable');
+  Object.assign(o, { planned: false, date: monthOf(today) === monthOf(o.date) ? today : o.date });
+}
 
 // shortcut: monthly recurrence only; yearly items (taxes) are entered as one-off planned ops.
 export function generateRecurring(s, m) {
@@ -308,8 +328,12 @@ export function valuation(s, today) {
     const inst = s.instruments.find(i => i.isin === p.isin) ?? { isin: p.isin, name: p.isin, currency: 'EUR' };
     const q = s.quotes[p.isin]?.currency === inst.currency ? s.quotes[p.isin] : null;
     const fx = inst.currency === 'EUR' ? null : s.fx[inst.currency] ?? null;
-    const value = q && (fx || inst.currency === 'EUR') ? Math.round((p.qty * q.price * 100) / (fx?.rate ?? 1)) : null;
-    return { ...p, inst, quote: q, fx, value, gain: value == null ? null : value - p.cost,
+    const raw = q && (fx || inst.currency === 'EUR') ? Math.round((p.qty * q.price * 100) / (fx?.rate ?? 1)) : null;
+    // a price that makes the line worth under a third or over three times what was paid is far more likely
+    // a wrong listing (other exchange, other currency) than a real move: it is set aside rather than shown
+    const suspect = raw != null && p.cost > 0 && (raw < p.cost * 0.35 || raw > p.cost * 3);
+    const value = suspect ? null : raw;
+    return { ...p, inst, quote: q, fx, value, suspect, gain: value == null ? null : value - p.cost,
       stale: isStale(q?.asOf, today) || (inst.currency !== 'EUR' && isStale(fx?.asOf, today)) };
   });
 }
@@ -372,8 +396,11 @@ export function suggestions(s, today) {
     const base = { isin: i.isin, name: i.name, held: isHeld, reasons };
     const fxOk = i.currency === 'EUR' || !isStale(s.fx[i.currency]?.asOf, today);
     // a missing or stale price suspends the verdict instead of guessing
-    if (!q || q.currency !== i.currency || isStale(q.asOf, today) || !fxOk) {
-      add(0, !q ? 'Aucun cours : actualisez ou saisissez-le.' : !fxOk ? `Taux de change ${i.currency} absent ou périmé.` : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source);
+    const odd = lines.find(l => l.isin === i.isin && l.suspect);
+    if (!q || q.currency !== i.currency || isStale(q.asOf, today) || !fxOk || odd) {
+      add(0, !q ? 'Aucun cours : actualisez ou saisissez-le.' : !fxOk ? `Taux de change ${i.currency} absent ou périmé.`
+        : odd ? `Cours à vérifier : ${q.price} ${q.currency} donnerait une ligne sans rapport avec les ${euro(odd.cost)} investis (mauvaise cotation ?).`
+          : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source);
       return { ...base, action: 'Suspendu', score: 0, suspended: true };
     }
     const t = p.targets[i.isin] ?? 0;
@@ -537,8 +564,10 @@ export function importPreview(s, accountId, rows) {
 
 export function importRows(s, accountId, preview, today) {
   const kept = preview.filter(r => r.keep);
-  for (const r of kept) s.ops.push({ id: uid(), accountId, date: r.date, amount: r.amount, kind: r.amount < 0 ? 'expense' : 'income',
-    categoryId: null, label: r.label, importKey: r.importKey });
+  for (const r of kept) {
+    const o = { id: uid(), accountId, date: r.date, amount: r.amount, kind: r.amount < 0 ? 'expense' : 'income', categoryId: null, label: r.label, importKey: r.importKey };
+    s.ops.push(o); autoMatch(s, o);
+  }
   s.lastImport = { date: today, accountId, count: kept.length };
   return kept.length;
 }

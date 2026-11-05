@@ -18,12 +18,31 @@ test('B02: à date / prévu, then reconciliation counts once', () => {
   op(s, 'income', 2500); op(s, 'expense', 1200); op(s, 'expense', 500, { planned: true });
   let st = B.monthStats(s, M);
   assert.equal(st.toDate, 130000); assert.equal(st.forecast, 80000);
-  op(s, 'expense', 500);
-  const planned = s.ops.find(o => o.planned), real = B.matchCandidates(s, planned)[0];
-  assert.equal(real.amount, -50000);
-  B.match(s, planned.id, real.id);
+  op(s, 'expense', 480); // the real payment, a little different from what was planned, settles it on its own
   st = B.monthStats(s, M);
-  assert.equal(st.toDate, 80000); assert.equal(st.forecast, 80000);
+  assert.equal(st.toDate, 82000); assert.equal(st.forecast, 82000);
+});
+
+test('« Payé ✓ » turns an upcoming item into a payment; an unrelated expense does not settle it', () => {
+  const s = base(), cat = s.categories[3].id;
+  B.saveOp(s, { accountId: 'a', date: `${M}-10`, kind: 'expense', cents: 15000, categoryId: cat, label: 'Assurance auto', planned: true });
+  B.saveOp(s, { accountId: 'b', date: `${M}-05`, kind: 'expense', cents: 4000, label: 'Courses' }); // other account, other amount
+  assert.equal(B.upcoming(s, M).length, 1);
+  B.markPaid(s, B.upcoming(s, M)[0].id, `${M}-04`);
+  assert.equal(B.upcoming(s, M).length, 0);
+  const st = B.monthStats(s, M);
+  assert.equal(st.spent, 19000); assert.equal(st.forecast, -19000);
+  assert.equal(s.ops.find(o => o.label === 'Assurance auto').date, `${M}-04`);
+});
+
+test('A price far from what was paid is set aside as « à vérifier » instead of showing a false loss', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', AAPL, '2025-01-01', 3, 74245); // 3 shares bought 742,45 €
+  B.setQuote(s, AAPL, 37.4, T); s.fx.USD = { rate: 1, asOf: T }; // the wrong listing: 3 × 37 = 112 €
+  const [line] = B.valuation(s, T);
+  assert.equal(line.value, null); assert.equal(line.suspect, true);
+  const v = B.suggestions(s, T).find(x => x.isin === AAPL);
+  assert.equal(v.action, 'Suspendu'); assert.match(v.reasons[0].text, /Cours à vérifier/);
 });
 
 test('B01: transfer changes neither income nor spending; savings transfer reported', () => {
@@ -238,6 +257,31 @@ test('Market scan falls back to recent market articles when the trending endpoin
   await discover(s, T, fake);
   assert.deepEqual(s.instruments.filter(i => i.auto).map(i => i.isin), ['SAP.DEX']);
 });
+
+test('Own price service: listing found from the ISIN (OpenFIGI for US ISINs), currency from the listing, no quota', async () => {
+  const { refreshMarket, pickFromFigi } = await import('./market.js');
+  const s = withInstruments(); // an Irish ETF and Apple, both looked up by ISIN
+  B.addHolding(s, 'b', AAPL, '2025-01-01', 3, 60000);
+  Object.assign(s.settings.market, { enabled: true, proxyUrl: 'https://prix.example.workers.dev/', proxyKey: 'secret' });
+  const seen = [];
+  const fake = async (url, init) => {
+    seen.push([url.replace('https://prix.example.workers.dev', ''), init?.headers?.['x-key']]);
+    const p = new URL(url).pathname, body = p === '/search' ? [] // Yahoo does not know US ISINs
+      : p === '/figi' ? (url.includes(AAPL) ? [{ ticker: 'APC', exchCode: 'GR' }, { ticker: 'AAPL', exchCode: 'US' }] : [{ ticker: 'EUNL', exchCode: 'GY' }])
+        : p === '/chart' ? { currency: 'USD', closes: closes(270, 0.1) } : { date: T, rates: { USD: 1.12 } };
+    return { ok: true, json: async () => body };
+  };
+  assert.deepEqual(await refreshMarket(s, T, fake), []);
+  const apple = s.instruments.find(i => i.isin === AAPL), etf = s.instruments.find(i => i.isin === ETF);
+  assert.equal(apple.ysym, 'AAPL'); assert.equal(etf.ysym, 'EUNL.DE'); assert.equal(etf.currency, 'USD'); // currency comes from the listing
+  assert.equal(s.quotes[AAPL].source, 'Yahoo (service perso)'); assert.equal(s.history[AAPL].length, 100);
+  assert.ok(seen.filter(([u]) => u.startsWith('/')).every(([, k]) => k === 'secret'));
+  assert.equal(pickFromFigi([{ ticker: 'EI4', exchCode: 'GR' }, { ticker: '9684', exchCode: 'JT' }], 'JP3164630000'), '9684.T');
+  // a wrong password is reported once, in plain words
+  const denied = await refreshMarket(withInstrumentsOn(s.settings.market), T, async u => (u.includes('frankfurter') ? { ok: true, json: async () => ({ rates: {} }) } : { ok: false, status: 401 }));
+  assert.deepEqual(denied, ['World : Service de cours : mot de passe refusé']);
+});
+const withInstrumentsOn = market => { const s = withInstruments(); Object.assign(s.settings.market, market); return s; };
 
 test('Adding a title: name search gives symbol, type and currency; no ISIN needed; news searched by name or index', async () => {
   const { searchSymbols } = await import('./market.js');
