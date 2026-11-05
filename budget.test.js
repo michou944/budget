@@ -188,7 +188,7 @@ test('P01: refresh is opt-in, stores 100 days of closes, logs hosts without the 
     return { ok: true, json: async () => body };
   };
   const errors = await refreshMarket(s, T, fake);
-  assert.equal(s.quotes[ETF].price, 104.5); assert.equal(s.quotes[ETF].asOf, T); assert.equal(s.history[ETF].length, 100);
+  assert.equal(s.quotes[ETF].price, 104.5); assert.equal(s.quotes[ETF].asOf, T); assert.equal(s.history[ETF].length, 120); // up to a year is kept
   assert.equal(s.fx.USD.rate, 1.12);
   assert.match(errors.join(), /rate limit/);
   assert.ok(!JSON.stringify(s.requestLog).includes('SECRETKEY'));
@@ -660,6 +660,20 @@ test('Test E — a 10-for-1 split multiplies the quantity, divides the unit cost
   B.addSale(s, 'b', ETF, '2026-07-01', 10, 15000); // sells 10 for 150 € that cost 100 €
   assert.equal(B.realizedGain(s, ETF), 5000); assert.equal(B.positions(s)[0].cost, 40000);
   assert.throws(() => B.addSplit(s, 'b', ETF, T, 1), /Ratio/);
+});
+
+test('Indicators from one year of prices, and the conclusion frame (missing data, invalidation, confidence)', () => {
+  const s = withInstruments();
+  const year = Array.from({ length: 252 }, (_, k) => [dateBack(251 - k), 100 + k * 0.2 + (k % 2 ? 1 : -1)]); // rising, zigzag
+  B.setHistory(s, ETF, year, 'Yahoo', T);
+  const ind = B.indicators(s, ETF);
+  assert.equal(ind.days, 252); assert.ok(ind.sma200 < ind.sma50 && ind.sma50 < ind.last);
+  assert.ok(ind.rsi > 50 && ind.rsi < 100); assert.ok(ind.drawdown <= 0 && ind.drawdown > -2); assert.ok(ind.vol > 0);
+  const v = verdict(s, ETF);
+  assert.match(v.invalidation, /moyenne 200 jours/);
+  assert.ok(v.missing.some(m => /Fondamentaux/.test(m)) && !v.missing.some(m => /200 jours indisponible/.test(m)));
+  assert.equal(v.confidence, 'Moyenne'); // a year of prices, but no news tone yet
+  assert.equal(B.indicators(s, AAPL), null);
 });
 
 test('demo data reproduces the spec figures', () => {

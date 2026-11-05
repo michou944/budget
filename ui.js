@@ -174,7 +174,7 @@ function spark(isin) {
 function priceChart(isin, currency) {
   const all = S.history[isin] ?? [], range = view.range ?? '3m';
   if (all.length < 2) return empty('La courbe apparaît après la première actualisation des cours.');
-  const h = all.slice(-{ '1m': 22, '3m': 63, '6m': 130 }[range]), p = h.map(x => x[1]);
+  const h = all.slice(-{ '1m': 22, '3m': 63, '6m': 130, '1y': 260 }[range]), p = h.map(x => x[1]);
   const lo = Math.min(...p), hi = Math.max(...p), W = 320, H = 150, x = k => (k * W) / (h.length - 1), y = v => 14 + (1 - (v - lo) / (hi - lo || 1)) * (H - 40);
   const up = p.at(-1) >= p[0], col = up ? 'var(--good)' : 'var(--bad)', chg = (p.at(-1) / p[0] - 1) * 100;
   const pts = h.map((q, k) => `${x(k).toFixed(1)},${y(q[1]).toFixed(1)}`).join(' '), two = v => v.toFixed(2).replace('.', ',');
@@ -185,7 +185,7 @@ function priceChart(isin, currency) {
     + `<polygon fill="url(#pg)" points="0,${H - 26} ${pts} ${W},${H - 26}"/><polyline fill="none" stroke="${col}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" points="${pts}"/>`
     + `<text x="2" y="10" font-size="10" fill="var(--muted)">max ${two(hi)}</text><text x="2" y="${H - 30}" font-size="10" fill="var(--muted)">min ${two(lo)}</text>`
     + `<text x="2" y="${H - 6}" font-size="10" fill="var(--muted)">${shortDate(h[0][0])}</text><text x="${W - 2}" y="${H - 6}" font-size="10" text-anchor="end" fill="var(--muted)">${shortDate(h.at(-1)[0])}</text></svg>`
-    + `<div class="seg">${[['1m', '1 mois'], ['3m', '3 mois'], ['6m', '6 mois']].map(([r, t]) => `<button class="${range === r ? '' : 'ghost'}" data-act="range" data-id="${r}">${t}</button>`).join('')}</div>`;
+    + `<div class="seg">${[['1m', '1 mois'], ['3m', '3 mois'], ['6m', '6 mois'], ['1y', '1 an']].map(([r, t]) => `<button class="${range === r ? '' : 'ghost'}" data-act="range" data-id="${r}">${t}</button>`).join('')}</div>`;
 }
 const fab = () => `<button class="fab" data-act="newOp" aria-label="Ajouter un mouvement">＋</button>`;
 
@@ -307,7 +307,20 @@ const views = {
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
         priceChart(isin, i.currency)
         + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
-        + x.reasons.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}</span></div>`).join('')
+        + [['👍 Pour', r => r.pts > 0], ['👎 Contre', r => r.pts < 0], ['ℹ️ À savoir', r => !r.pts]].map(([t, keep]) => {
+          const rs = x.reasons.filter(keep);
+          return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}</span></div>`).join('') : '';
+        }).join('')
+        + (x.missing?.length ? `<div class="day">❔ Données manquantes</div>${x.missing.map(m => `<div class="muted">• ${esc(m)}</div>`).join('')}` : '')
+        + (x.invalidation ? `<div class="day">🔄 Ce qui changerait l’avis</div><div class="muted">${esc(x.invalidation)}</div>` : '')
+        + (x.confidence ? `<div class="day">Confiance : ${x.confidence}</div>${empty('Qualité et quantité des données derrière cet avis, pas une probabilité de gain.')}` : '')
+        + ((ind => (!ind ? '' : `<details style="margin-top:10px"><summary><b>📊 Indicateurs</b></summary>`
+          + [[`Moyenne 50 jours : ${ind.sma50 ? ind.sma50.toFixed(2).replace('.', ',') : '—'}`, 'Le cours moyen des 2,5 derniers mois. Au-dessus : tendance courte haussière.'],
+            [`Moyenne 200 jours : ${ind.sma200 ? ind.sma200.toFixed(2).replace('.', ',') : 'il faut 1 an de cours'}`, 'La tendance de fond. Beaucoup d’investisseurs la surveillent.'],
+            [`RSI : ${Math.round(ind.rsi)}`, 'Vitesse des dernières hausses et baisses (14 jours). Au-dessus de 70 : la hausse s’emballe ; sous 30 : la baisse s’emballe. Ce n’est pas un signal d’achat ou de vente à lui seul.'],
+            [`Volatilité : ${Math.round(ind.vol)} % par an`, 'Amplitude habituelle des variations. Sous 20 % : calme ; au-dessus de 40 % : très agité.'],
+            [`Baisse depuis le plus haut : ${ind.drawdown.toFixed(1).replace('.', ',')} %`, `Plus haut ${ind.hi.toFixed(2).replace('.', ',')} · plus bas ${ind.lo.toFixed(2).replace('.', ',')} sur ${ind.days >= 250 ? '52 semaines' : `${ind.days} séances`}.`]]
+            .map(([v, e]) => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${v}</b><div class="muted">${e}</div></div>`).join('') + '</details>'))(B.indicators(S, isin)))
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')

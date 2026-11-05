@@ -34,8 +34,8 @@ export default {
           body: JSON.stringify([{ idType: 'ID_ISIN', idValue: q('isin') }]) });
         return reply(((await r.json())[0]?.data ?? []).map(x => ({ ticker: x.ticker, exchCode: x.exchCode })));
       }
-      if (u.pathname === '/chart') { // symbol → currency and 6 months of daily closes
-        const r = await fetch(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(q('s'))}?range=6mo&interval=1d`, { headers: UA });
+      if (u.pathname === '/chart') { // symbol → currency and 1 year of daily closes (enough for a 200-day average)
+        const r = await fetch(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(q('s'))}?range=1y&interval=1d`, { headers: UA });
         const res = (await r.json()).chart?.result?.[0];
         if (!res?.timestamp) return reply({ error: 'cotation introuvable' }, 404);
         const close = res.indicators.quote[0].close;

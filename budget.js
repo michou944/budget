@@ -265,13 +265,27 @@ export function newsQuery(i) {
 // Daily closes from the price provider: keeps the last 100 and makes the latest one the current quote.
 export function setHistory(s, isin, points, source, today) {
   const inst = s.instruments.find(i => i.isin === isin);
-  const h = points.filter(([d, p]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && p > 0).sort((a, b) => a[0].localeCompare(b[0])).slice(-100);
+  const h = points.filter(([d, p]) => /^\d{4}-\d{2}-\d{2}$/.test(d) && p > 0).sort((a, b) => a[0].localeCompare(b[0])).slice(-260);
   if (!inst || !h.length) return false;
   s.history[isin] = h;
   const [asOf, price] = h.at(-1), hi = h.reduce((m, x) => (x[1] > m[1] ? x : m));
   s.quotes[isin] = { price, currency: inst.currency, asOf, source, fetchedAt: today };
   trackPeak(s, isin, hi[1], hi[0]);
   return true;
+}
+
+// Technical indicators from the daily closes (up to one year); null when there are too few prices.
+export function indicators(s, isin) {
+  const c = (s.history[isin] ?? []).map(x => x[1]);
+  if (c.length < 20) return null;
+  const last = c.at(-1), avg = n => (c.length >= n ? c.slice(-n).reduce((a, b) => a + b, 0) / n : null);
+  const year = c.slice(-252), hi = Math.max(...year), lo = Math.min(...year);
+  const rets = c.slice(-61).map((v, k, a) => (k ? Math.log(v / a[k - 1]) : 0)).slice(1), mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const vol = Math.sqrt(rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length - 1)) * Math.sqrt(252) * 100; // annualised, last 3 months
+  let up = 0, down = 0;
+  for (let k = c.length - 14; k < c.length; k++) { const d = c[k] - c[k - 1]; if (d > 0) up += d; else down -= d; }
+  // shortcut: RSI over 14 days with simple averages, not Wilder's smoothing — same reading, slightly noisier
+  return { last, sma50: avg(50), sma200: avg(200), hi, lo, drawdown: (last / hi - 1) * 100, vol, rsi: down ? 100 - 100 / (1 + up / down) : 100, days: year.length };
 }
 
 export function trend(s, isin) {
@@ -508,7 +522,15 @@ export function suggestions(s, today) {
     const action = notable.length ? 'À examiner'
       : isHeld ? (score <= -3 ? 'Vendre' : limitHit || score <= -2 ? 'Alléger' : score >= 2 && !overCap ? 'Renforcer' : 'Conserver')
         : score >= 2 ? 'Acheter' : 'Attendre';
-    return { ...base, action, score };
+    // the conclusion's frame: what it still lacks, what would overturn it, and how much data stands behind it
+    const ind = indicators(s, i.isin), level = ind?.sma200 ?? ind?.sma50, two = v => v.toFixed(2).replace('.', ',');
+    const missing = [!ind?.sma200 && 'Moins d’un an de cours : moyenne 200 jours indisponible.', !recent.length && 'Aucune actualité récente analysée.',
+      'Fondamentaux (chiffre d’affaires, résultats, valorisation) non analysés : pas de source gratuite fiable.'].filter(Boolean);
+    const invalidation = !level ? null : ['Vendre', 'Alléger'].includes(action)
+      ? `Revoir si le cours repasse au-dessus de ${two(ind.sma50 ?? level)} ${i.currency} (moyenne 50 jours).`
+      : `Revoir si le cours passe sous ${two(level)} ${i.currency} (moyenne ${ind.sma200 ? 200 : 50} jours)${notable.length ? ' ou après lecture de l’actualité signalée' : ''}.`;
+    const confidence = ind?.sma200 && tones.length >= 2 ? 'Élevée' : ind?.sma50 ? 'Moyenne' : 'Faible';
+    return { ...base, action, score, missing, invalidation, confidence };
   });
 
   // this month's envelope goes to the strongest buy signal, within the remaining amount and the broker's cash
