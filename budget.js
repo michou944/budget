@@ -374,6 +374,11 @@ export const RISK = {
   equilibre: { label: 'Équilibré', trail: 12, maxLoss: 20 },
   dynamique: { label: 'Dynamique', trail: 20, maxLoss: 35 },
 };
+// shortcut: PEA eligibility guessed — European company (ISIN country), or a fund with « PEA » in its name or a French or
+// Luxembourg ISIN (Irish-domiciled ETFs are generally not eligible); the broker has the final word
+const EEA = 'FR DE NL BE IT ES PT LU AT FI DK SE NO IS LI GR CY MT SI SK EE LV LT PL CZ HU RO BG HR'.split(' ');
+export const peaEligible = i => /\bPEA\b/i.test(i.name) || EEA.includes(i.isin.slice(0, 2));
+
 export const DISCLAIMER = 'Information, pas un conseil en investissement. Aucun ordre n’est passé.';
 const euro = c => `${(c / 100).toFixed(2).replace('.', ',')} €`;
 const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
@@ -451,26 +456,35 @@ export function suggestions(s, today) {
   const pick = left > 0 && out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score)[0];
   if (pick) {
     const i = s.instruments.find(x => x.isin === pick.isin), line = lines.find(l => l.isin === pick.isin);
-    const accounts = line ? [s.accounts.find(a => a.id === line.accountId)]
-      : s.accounts.filter(a => s.snapshots?.[a.id] || s.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
-    const fxCost = i.currency === 'EUR' ? 0 : p.fxPct / 100;
-    const raw = (s.quotes[i.isin].price * 100 * (1 + fxCost)) / (i.currency === 'EUR' ? 1 : s.fx[i.currency].rate);
-    const unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
-    // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
+    // a held title is topped up where it is held; a new one goes to any brokerage account allowed to hold it
+    const accounts = (line ? [s.accounts.find(a => a.id === line.accountId)]
+      : s.accounts.filter(a => s.snapshots?.[a.id] || ['PEA', 'CTO'].includes(a.type) || s.ops.some(o => o.kind === 'invest' && o.accountId === a.id)))
+      .filter(a => a.type !== 'PEA' || peaEligible(i));
+    const price = s.quotes[i.isin].price, rate = i.currency === 'EUR' ? 1 : s.fx[i.currency].rate;
+    // each broker's own fees (fixed per order, % of the amount, currency conversion), else the profile's estimate
     const plan = a => {
+      const fixed = a.feeFixed ?? p.fee, rest = (1 + (a.feePct ?? 0) / 100) * (1 + (i.currency === 'EUR' ? 0 : (a.fxPct ?? p.fxPct) / 100));
+      const raw = (price * 100 * rest) / rate, unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
+      // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
       const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);
       const limit = known ? Math.min(left, cash) : left;
-      const qty = a.fractional ? Math.max(0, Math.floor(((limit - p.fee) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - p.fee) / unit));
-      return { a, limit, qty, total: qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + p.fee : 0,
+      const qty = a.fractional ? Math.max(0, Math.floor(((limit - fixed) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - fixed) / unit));
+      const total = qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + fixed : 0;
+      return { a, limit, qty, unit, total, fees: qty ? total - Math.round((qty * price * 100) / rate) : 0,
         where: !known ? 'reliquat de l’enveloppe, encaisse inconnue' : cash < left ? `limité par l’encaisse ${a.name}` : 'reliquat de l’enveloppe' };
     };
-    const best = accounts.map(plan).sort((x, y) => y.total - x.total)[0];
+    const plans = accounts.map(plan);
+    // a PEA wins when it can buy (less tax after 5 years); otherwise the account buying the most, then the cheapest
+    const best = [...plans].sort((x, y) => (y.qty > 0) - (x.qty > 0) || (y.a.type === 'PEA') - (x.a.type === 'PEA') || y.total - x.total || x.fees - y.fees)[0];
     const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
-    if (!best) pick.reasons.push({ pts: 0, text: 'Enveloppe du mois : aucun compte titres connu pour acheter.' });
-    else if (!best.qty) pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${euro(best.limit)} disponibles (${best.where}), insuffisant pour une part (${euro(unit)}) et les frais. Un compte acceptant les fractions de parts le permettrait.` });
+    if (!best) pick.reasons.push({ pts: 0, text: 'Enveloppe du mois : aucun compte titres ne peut recevoir ce titre (le PEA est réservé aux titres européens).' });
+    else if (!best.qty) pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${euro(best.limit)} disponibles (${best.where}), insuffisant pour une part (${euro(best.unit)}) et les frais. Un compte acceptant les fractions de parts le permettrait.` });
     else {
-      pick.buy = { qty: best.qty, total: best.total, limit: best.limit, accountId: best.a.id };
-      pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${parts(best.qty)} sur ${best.a.name} pour environ ${euro(best.total)} frais compris (${best.where} : ${euro(best.limit)}).` });
+      pick.buy = { qty: best.qty, total: best.total, fees: best.fees, limit: best.limit, accountId: best.a.id };
+      pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${parts(best.qty)} sur ${best.a.name}${best.a.type === 'PEA' ? ' (PEA : moins d’impôts après 5 ans)' : ''}`
+        + ` pour environ ${euro(best.total)}, dont ${euro(best.fees)} de frais (${best.where} : ${euro(best.limit)}).` });
+      const others = plans.filter(x => x.qty && x !== best);
+      if (others.length) pick.reasons.push({ pts: 0, text: `Frais pour ce même montant ailleurs : ${others.map(x => `${x.a.name} ${euro(x.fees)}`).join(' · ')}.` });
     }
   }
   return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
@@ -651,7 +665,8 @@ export function parseFortuneoRows(rows) {
     lines.push({ isin, name: label.replace(/\s*\([A-Z0-9.]+\)$/, ''), ticker, currency: String(r[c.ccy]).trim().toUpperCase() || 'EUR',
       qty, price, value: Math.round(value * 100), cost: Math.round((value - pv) * 100) }); // valuation and gain are in euros
   });
-  return { date, kind: rows.slice(0, h).map(r => String(r[0]).match(/^\((\w+)/)?.[1]).find(Boolean) ?? '', lines, errors };
+  const head0 = rows.slice(0, h).map(r => String(r[0]));
+  return { date, kind: head0.map(t => t.match(/^\((\w+)/)?.[1]).find(Boolean) ?? '', portfolio: head0.map(t => t.match(/Portefeuille\s+(\S+)/)?.[1]).find(Boolean) ?? '', lines, errors };
 }
 
 // shortcut: price symbol guessed from the ticker the broker shows (US → as is, Paris in EUR → .PAR); others via « Trouver le cours »
@@ -667,7 +682,9 @@ export function applySnapshot(s, accountId, snap, source) {
     if (l.currency !== 'EUR' && !(s.fx[l.currency]?.asOf >= snap.date))
       s.fx[l.currency] = { rate: (l.qty * l.price * 100) / l.value, asOf: snap.date, source: `${source} (taux implicite)`, fetchedAt: snap.date };
   }
-  s.snapshots[accountId] = { date: snap.date, source, seq: stamp(s), lines: snap.lines.map(({ isin, qty, cost }) => ({ isin, qty, cost })) };
+  s.snapshots[accountId] = { date: snap.date, source, portfolio: snap.portfolio ?? '', seq: stamp(s), lines: snap.lines.map(({ isin, qty, cost }) => ({ isin, qty, cost })) };
+  const a = s.accounts.find(x => x.id === accountId);
+  if (a && !a.type && /^(PEA|CHQ|CTO)$/.test(snap.kind ?? '')) a.type = snap.kind === 'PEA' ? 'PEA' : 'CTO'; // the export says what kind of account it is
   s.lastImport = { date: snap.date, accountId, count: snap.lines.length };
   return snap.lines.length;
 }

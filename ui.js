@@ -75,6 +75,7 @@ const views = {
     const accounts = (title, list) => (list.length ? `<div class="muted" style="margin-top:8px">${title}</div>`
       + list.map(a => row(`${esc(a.name)} <span class="muted">${esc(a.institution)}</span>`, B.balance(S, a))).join('') : '');
     const cats = B.categorySpend(S, m).filter(c => c.spent || c.cap);
+    const paid = S.ops.filter(o => !o.planned && B.monthOf(o.date) === m && o.kind === 'expense').sort((a, b) => b.date.localeCompare(a.date));
     const after = [st.expectedSpent && 'ce qui reste à payer', st.reserve && `votre épargne de côté (${eur(st.reserve)})`, st.stock && `votre budget bourse (${eur(st.stock)})`].filter(Boolean);
     return monthBar(false)
       + `<section class="card hero"><div class="muted">Il vous reste à dépenser ${thisMonth ? 'ce mois-ci' : `en ${m}`}</div><div class="big">${eur(st.spendable)}</div>`
@@ -89,6 +90,8 @@ const views = {
         + `<div class="muted">${o.date} · ${esc(accName(o.accountId))}</div></div><div class="r">${money(o.amount)}`
         + `<div class="actions">${btn('paid', o.id, o.amount > 0 ? 'Reçu ✓' : 'Payé ✓', 'small')}</div></div></div>`).join('')
         || empty('Rien à venir. Vos échéances récurrentes (loyer, abonnements…) se règlent dans Réglages.'))
+      + (paid.length ? card(`Déjà payé ce mois · ${eur(paid.reduce((t, o) => t - o.amount, 0))}`, paid.slice(0, 8).map(opItem).join('')
+        + (paid.length > 8 ? `<div style="margin-top:6px">${btn('goOps', '', `Voir les ${paid.length} paiements →`, 'small ghost')}</div>` : '')) : '')
       + card('Mes comptes', (accounts('Comptes courants', S.accounts.filter(a => a.liquid)) + accounts('Épargne', S.accounts.filter(a => a.savings))
         + accounts('Espèces chez les courtiers', S.accounts.filter(a => !a.liquid && !a.savings))) || empty('Aucun compte : créez-en dans Réglages.'))
       + (cats.length ? card('Dépenses par catégorie', (S.settings.globalCap ? bar('Total du mois', st.spent, S.settings.globalCap) : '') + cats.map(c => bar(c.name, c.spent, c.cap)).join('')) : '')
@@ -145,7 +148,7 @@ const views = {
       const gain = ls.reduce((a, l) => a + (l.gain ?? 0), 0);
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
-        + (x.buy ? `<div class="good">Enveloppe : ${num(x.buy.qty)} part(s) ≈ ${eur(x.buy.total)}</div>` : '') + '</div>'
+        + (x.buy ? `<div class="good">Enveloppe : ${num(x.buy.qty)} part(s) ≈ ${eur(x.buy.total)} sur ${esc(accName(x.buy.accountId))}</div>` : '') + '</div>'
         + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
@@ -267,7 +270,13 @@ const views = {
       <input name="opening" inputmode="decimal" placeholder="Solde initial €" value="${a ? euros(a.opening) : ''}">
       <label class="chk"><input type="checkbox" name="liquid"${!a || a.liquid ? ' checked' : ''}> Inclure dans les liquidités</label>
       <label class="chk"><input type="checkbox" name="savings"${a?.savings ? ' checked' : ''}> Compte épargne</label>
-      <label class="chk"><input type="checkbox" name="fractional"${a?.fractional ? ' checked' : ''}> Courtier acceptant les fractions de parts (ex. Trade Republic, IBKR)</label>
+      <details${a?.type ? ' open' : ''}><summary class="muted">Compte de bourse : type et frais</summary>
+      <label>Type<select name="type">${opts([['', 'Compte bancaire'], ['CTO', 'Compte-titres (CTO)'], ['PEA', 'PEA']], a?.type ?? '')}</select></label>
+      <div class="grid2"><label>Frais par ordre (€)<input name="feeFixed" inputmode="decimal" value="${a?.feeFixed != null ? String(a.feeFixed / 100).replace('.', ',') : ''}"></label>
+      <label>Frais en % du montant<input name="feePct" inputmode="decimal" value="${a?.feePct != null ? String(a.feePct).replace('.', ',') : ''}"></label></div>
+      <label>Frais de change hors euro (%)<input name="fxPct" inputmode="decimal" value="${a?.fxPct != null ? String(a.fxPct).replace('.', ',') : ''}"></label>
+      <label class="chk"><input type="checkbox" name="fractional"${a?.fractional ? ' checked' : ''}> Accepte les fractions de parts (ex. Trade Republic, IBKR)</label>
+      ${empty('Recopiez les frais de la grille tarifaire de votre courtier. Vide = estimation de votre profil. L’app choisit le compte où acheter : le PEA quand le titre y est éligible, sinon le moins cher.')}</details>
       <div class="grid2"><button class="${a ? 'ghost' : ''}">${a ? 'Enregistrer' : 'Ajouter le compte'}</button>${a ? btn('delAcc', a.id, 'Supprimer', 'danger') : ''}</div>
       ${a ? empty('Solde actuel : ' + eur(B.balance(S, a))) : ''}</form>`;
     const catForm = c => `<form data-form="cat" class="grid2" style="grid-template-columns:2fr 1fr auto${c ? ' auto' : ''};margin-bottom:6px"><input type="hidden" name="id" value="${c?.id ?? ''}">
@@ -315,12 +324,17 @@ function importBlock() {
 
 function tradeImportBlock() {
   const p = view.trades, sn = view.snap;
+  // another Fortuneo portfolio (PEA vs compte-titres) already imported into this account would be overwritten
+  const prev = sn && S.snapshots[sn.accountId], other = prev?.portfolio && sn.data.portfolio && prev.portfolio !== sn.data.portfolio ? prev.portfolio : '';
   if (sn) return empty(`Portefeuille ${esc(sn.data.kind)} du ${sn.data.date} · ${sn.data.lines.length} ligne(s) → compte ${esc(accName(sn.accountId))}`
       + `${sn.data.errors.length ? ` · lignes illisibles : ${sn.data.errors.join(', ')}` : ''}`)
     + sn.data.lines.map(l => `<div class="op"><div class="l">${esc(l.name)}<div class="muted">${num(l.qty)} × ${num(l.price)} ${l.currency} · ${esc(l.isin)}</div></div>`
       + `<div class="r">${eur(l.value)}<div>${money(l.value - l.cost)}</div></div></div>`).join('')
-    + empty(`Ces positions ${S.snapshots[sn.accountId] ? 'remplacent celles du précédent export' : 'deviennent celles de ce compte'} ; les achats saisis après le ${sn.data.date} s’y ajoutent.`)
-    + `<div class="grid2">${btn('cancelSnap', '', 'Annuler', 'ghost')}${btn('confirmSnap', '', 'Importer', '')}</div>`;
+    + (other ? `<div class="bad">Attention : ce compte contient déjà un autre portefeuille Fortuneo (n° …${esc(other.slice(-4))}). Importer ici remplacerait ses positions.
+        Choisissez ou créez un compte à part, par exemple « Fortuneo ${esc(sn.data.kind === 'PEA' ? 'PEA' : 'CTO')} ».</div>` : '')
+    + empty(`Fichier : portefeuille ${esc(sn.data.kind === 'CHQ' ? 'compte-titres (CTO)' : sn.data.kind)} n° …${esc(String(sn.data.portfolio).slice(-4))}. `
+      + `Ces positions ${S.snapshots[sn.accountId] ? 'remplacent celles du précédent export de ce compte' : 'deviennent celles de ce compte'} ; les achats saisis après le ${sn.data.date} s’y ajoutent.`)
+    + `<div class="grid2">${btn('cancelSnap', '', 'Annuler', 'ghost')}${btn('confirmSnap', '', other ? 'Remplacer quand même' : 'Importer', other ? 'danger' : '')}</div>`;
   if (!p) return `<form data-form="tradesFile"><select name="accountId" aria-label="Compte">${accOpts(S.accounts.find(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id))?.id)}</select>
     <input type="file" name="file" accept=".csv,.xls,.xlsx,text/csv" required><button>Aperçu</button>
     ${empty('Fortuneo : « Export portefeuille simple » (.xls), un fichier par compte (PEA, compte-titres). Trade Republic : « Exportation de transactions » (.csv). IBKR : Flex Query « Trades » en CSV.')}
@@ -470,7 +484,10 @@ const forms = {
     Object.assign(S.settings, { reserve, globalCap, alertPct, lowSpendable });
   },
   account: f => {
-    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on', fractional: f.fractional === 'on' };
+    const pctOrNone = v => { if (!String(v ?? '').trim()) return undefined; const x = Number(String(v).replace(',', '.')); if (!(x >= 0 && x <= 20)) throw new Error('Pourcentage de frais invalide'); return x; };
+    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: f.liquid === 'on', savings: f.savings === 'on', fractional: f.fractional === 'on',
+      type: f.type || undefined, feeFixed: String(f.feeFixed ?? '').trim() ? parseEur(f.feeFixed) : undefined, feePct: pctOrNone(f.feePct), fxPct: pctOrNone(f.fxPct) };
+    if (a.feeFixed < 0) throw new Error('Frais invalides');
     if (f.id) Object.assign(S.accounts.find(x => x.id === f.id), a); else S.accounts.push({ id: B.uid(), ...a });
   },
   cat: f => {

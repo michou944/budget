@@ -149,6 +149,10 @@ export async function refreshNews(s, today, fetchFn = fetch) {
   return errors;
 }
 
+// First meaningful word of a company name (« SONY ADR » and « Sony Group Corporation » → sony), to spot duplicates.
+const GENERIC = new Set(['the', 'adr', 'ads', 'inc', 'corp', 'group', 'holdings', 'holding', 'company', 'plc', 'ltd']);
+export const companyWord = name => String(name).toLowerCase().normalize('NFD').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).find(w => w.length > 2 && !GENERIC.has(w)) ?? '';
+
 // Marketaux symbol → Alpha Vantage symbol and listing currency; markets the app cannot price are skipped.
 // shortcut: US, Paris, Xetra and Amsterdam only; London (prices in pence) and others left out.
 const MARKETS = [[/^[A-Z]{1,5}$/, '', 'USD'], [/\.PA$/, '.PAR', 'EUR'], [/\.DE$/, '.DEX', 'EUR'], [/\.AS$/, '.AMS', 'EUR']];
@@ -211,6 +215,9 @@ export async function discover(s, today, fetchFn = fetch) {
       }
     } catch { /* names are cosmetic: the ticker stays */ }
   }
+  // the same company under another listing (US ADR, OTC line, other exchange) is not a new idea
+  const mine = new Set(s.instruments.filter(i => !i.auto).map(i => companyWord(i.name)));
+  for (const i of s.instruments.filter(i => i.auto && !held.has(i.isin) && mine.has(companyWord(i.name)))) deleteInstrument(s, i.isin);
   await refreshFx(s, today, fetchFn, errors); // an idea quoted in dollars needs today's rate
   return errors;
 }

@@ -552,6 +552,51 @@ test('Notifications: a verdict is announced when it changes, budget alerts once 
   assert.equal(p.length, 1); assert.equal(p[0].title, '5 avis bourse'); assert.match(p[0].body, /^Vendre : World, T1, T2, T3, T4$/);
 });
 
+test('Purchase goes to the PEA when the title is eligible, never a US stock; fees compared across brokers', () => {
+  const s = withInstruments();
+  B.saveInstrument(s, { isin: CW8, name: 'CW8', symbol: 'CW8.PAR', currency: 'EUR' });
+  s.accounts.push(
+    { id: 'pea', name: 'Fortuneo PEA', institution: 'Fortuneo', opening: 0, liquid: false, savings: false, type: 'PEA', feeFixed: 195 },
+    { id: 'tr', name: 'Trade Republic', institution: 'TR', opening: 0, liquid: false, savings: false, type: 'CTO', feeFixed: 100, fractional: true },
+    { id: 'ib', name: 'IBKR', institution: 'IBKR', opening: 0, liquid: false, savings: false, type: 'CTO', feeFixed: 300, fxPct: 0.03 });
+  B.setQuote(s, CW8, 561.2, T); B.setQuote(s, AAPL, 268.3, T); s.fx.USD = { rate: 1.12, asOf: T };
+  B.addEnvelope(s, M, 120000);
+  s.settings.profile.targets = { [CW8]: 100 };
+  let v = verdict(s, CW8);
+  assert.equal(v.buy.accountId, 'pea'); assert.equal(v.buy.qty, 2); assert.equal(v.buy.fees, 195);
+  assert.match(v.reasons.at(-2).text, /Fortuneo PEA \(PEA : moins d’impôts/);
+  assert.match(v.reasons.at(-1).text, /Trade Republic 1,00 € · IBKR 3,00 €/);
+  s.settings.profile.targets = { [AAPL]: 100 }; // US stock: not eligible to a PEA
+  v = verdict(s, AAPL);
+  assert.notEqual(v.buy.accountId, 'pea');
+  assert.ok(!v.reasons.some(r => /Fortuneo PEA/.test(r.text)));
+});
+
+test('A Fortuneo export tells the account type and its portfolio number', () => {
+  const s = base();
+  const snap = B.parseFortuneoRows(FORTUNEO);
+  assert.equal(snap.portfolio, '000000000000');
+  B.applySnapshot(s, 'b', snap, 'Fortuneo');
+  assert.equal(s.accounts[1].type, 'PEA'); assert.equal(s.snapshots.b.portfolio, '000000000000');
+});
+
+test('Market scan does not suggest a company already followed under another listing', async () => {
+  const { discover, companyWord } = await import('./market.js');
+  assert.equal(companyWord('SONY ADR (SONY)'), companyWord('Sony Group Corporation'));
+  const s = withInstruments();
+  B.saveInstrument(s, { isin: 'JP3164630000', name: 'Square Enix', currency: 'EUR' });
+  Object.assign(s.settings.market, { enabled: true, proxyUrl: 'https://p.example', newsKey: 'N' });
+  const rising = closes(50, 0.2);
+  const fake = async url => {
+    const body = url.includes('trending') ? { data: [{ key: 'SQNXF', total_documents: 20, sentiment_avg: 0.4 }, { key: 'NVDA', total_documents: 10, sentiment_avg: 0.4 }] }
+      : url.includes('entity/search') ? { data: [{ symbol: 'SQNXF', name: 'Square Enix Holdings Co., Ltd.' }, { symbol: 'NVDA', name: 'NVIDIA Corporation' }] }
+        : url.includes('/chart') ? { currency: 'USD', closes: rising } : { date: T, rates: { USD: 1.1 } };
+    return { ok: true, json: async () => body };
+  };
+  await discover(s, T, fake);
+  assert.deepEqual(s.instruments.filter(i => i.auto).map(i => i.name), ['NVIDIA Corporation']);
+});
+
 test('demo data reproduces the spec figures', () => {
   const demo = B.validateState(B.demoState('2026-11-03')), st = B.monthStats(demo, M);
   assert.equal(B.valuation(demo, '2026-11-03').filter(l => l.stale).length, 1);
