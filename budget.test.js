@@ -638,6 +638,30 @@ test('Active style: take part of the profit after a strong rise, buy back on a d
   assert.equal(v.action, 'Renforcer');
 });
 
+test('Test C — a line over the concentration limit is never reinforced, and a purchase never passes the limit', () => {
+  const s = p03(500000); // ETF held 10 × 104,50 €, CW8 followed
+  B.addHolding(s, 'b', CW8, '2025-01-01', 20, 1000000); // CW8: 20 × 561,20 € → ETF weighs about 8,5 %
+  s.settings.profile.targets = { [ETF]: 60, [CW8]: 40 }; s.settings.profile.maxWeight = 5;
+  const v = verdict(s, ETF);
+  assert.notEqual(v.action, 'Renforcer'); assert.ok(v.reasons.some(r => /au-delà de votre limite de 5 %/.test(r.text)));
+  B.addEnvelope(s, M, 100000);
+  assert.ok(!B.suggestions(s, T).some(x => x.isin === ETF && x.buy)); // no room left for the ETF
+});
+
+test('Test E — a 10-for-1 split multiplies the quantity, divides the unit cost, leaves the value; a sale books its realized gain', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 5, 50000); // 5 × 100 €
+  B.setQuote(s, ETF, 120, T);
+  const before = B.valuation(s, T)[0].value;
+  B.addSplit(s, 'b', ETF, '2026-06-10', 10);
+  B.setQuote(s, ETF, 12, T); // the listing price is divided too
+  const [p] = B.positions(s);
+  assert.equal(p.qty, 50); assert.equal(p.cost, 50000); assert.equal(B.valuation(s, T)[0].value, before);
+  B.addSale(s, 'b', ETF, '2026-07-01', 10, 15000); // sells 10 for 150 € that cost 100 €
+  assert.equal(B.realizedGain(s, ETF), 5000); assert.equal(B.positions(s)[0].cost, 40000);
+  assert.throws(() => B.addSplit(s, 'b', ETF, T, 1), /Ratio/);
+});
+
 test('demo data reproduces the spec figures', () => {
   const demo = B.validateState(B.demoState('2026-11-03')), st = B.monthStats(demo, M);
   assert.equal(B.valuation(demo, '2026-11-03').filter(l => l.stale).length, 1);

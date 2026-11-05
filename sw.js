@@ -1,13 +1,14 @@
 // Offline cache for the app's own files. Market data requests (other origins) are never cached:
 // an old quote must show with its own date, not be served silently as if it were fresh.
-const CACHE = 'budget-v16';
+const CACHE = 'budget-v17';
 const FILES = ['./', 'index.html', 'ui.js', 'budget.js', 'market.js', 'manifest.webmanifest', 'icon.svg', 'apple-touch-icon.png', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))));
 self.addEventListener('activate', e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))));
 // network first so updates show up, cache as offline fallback
 self.addEventListener('fetch', e => {
   if (new URL(e.request.url).origin !== location.origin) return;
-  e.respondWith(fetch(e.request, { cache: 'no-cache' }).then( // always revalidate: a new version shows at the next openingr => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
+  // always revalidate: a new version shows at the next opening
+  e.respondWith(fetch(e.request, { cache: 'no-cache' }).then(r => { const copy = r.clone(); caches.open(CACHE).then(c => c.put(e.request, copy)); return r; })
     .catch(() => caches.match(e.request)));
 });
 // a tapped notification opens the app on the tab it is about

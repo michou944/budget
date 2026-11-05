@@ -311,6 +311,14 @@ const views = {
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
+        + ((r => (r ? `<div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(r)}</div>` : ''))(B.realizedGain(S, isin)))
+        + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
+          + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
+          S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
+        + (lines.some(l => l.isin === isin) ? `<details style="margin-top:8px"><summary class="muted">Déclarer une division (split)</summary><form data-form="split">
+          <input type="hidden" name="isin" value="${esc(isin)}"><select name="accountId">${opts(lines.filter(l => l.isin === isin).map(l => [l.accountId, accName(l.accountId)]))}</select>
+          <div class="grid2"><label>Ratio (10 pour « 10 pour 1 »)<input name="ratio" inputmode="decimal" required></label><label>Date<input type="date" name="date" value="${t}" required></label></div>
+          <button class="ghost">Enregistrer la division</button>${empty('La quantité est multipliée, le coût total ne change pas. Inutile si l’export de votre courtier est postérieur à la division.')}</form></details>` : '')
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
           + `<div class="muted">${esc(n.source)} · ${n.publishedAt}</div></div></div>`).join('') || empty('Aucune actualité.'))
@@ -394,6 +402,8 @@ const views = {
         <div class="muted">Ma façon d’investir</div>
         <div class="chips">${chip('style', 'long', '🌳 Long terme : je garde', pf.style !== 'actif')}${chip('style', 'actif', '🔄 Actif : je vends les fortes hausses, je rachète les baisses', pf.style === 'actif')}</div>
         ${empty('En style actif, plus d’allers-retours veut dire plus de frais et, sur un compte-titres, plus d’impôts : à privilégier sur le PEA.')}
+        <div class="muted">Une seule ligne ne doit pas dépasser</div>
+        <div class="chips">${[0, 5, 10, 15, 20].map(w => chip('maxWeight', w, w ? `${w} % du portefeuille` : 'Pas de limite', (pf.maxWeight ?? 0) === w)).join('')}</div>
         <div class="muted">Je garde mes placements environ</div>
         <div class="chips">${[...new Set([2, 5, 10, 20, pf.horizon])].sort((x, y) => x - y).map(h => chip('horizon', h, `${h} ans`, pf.horizon === h)).join('')}</div>
         <div class="muted">Je supporte une baisse de</div>
@@ -604,7 +614,7 @@ const forms = {
     if (Object.values(targets).reduce((a, b) => a + b, 0) > 100.0001) throw new Error('La somme des cibles dépasse 100 %');
     const fee = parseEur(f.fee);
     if (!B.RISK[f.risk] || fee < 0) throw new Error('Valeur de profil invalide');
-    S.settings.profile = { style: f.style === 'actif' ? 'actif' : 'long', horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
+    S.settings.profile = { style: f.style === 'actif' ? 'actif' : 'long', maxWeight: n(f.maxWeight ?? 0, 0, 100), horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
   },
   quote: f => B.setQuote(S, f.isin, decimal(f.price), f.date),
   market: f => {
@@ -613,7 +623,16 @@ const forms = {
     if (proxyUrl !== S.settings.market.proxyUrl) for (const i of S.instruments) delete i.ysym; // listings are looked up again by the new service
     S.settings.market = { enabled: f.enabled === 'on', proxyUrl, proxyKey: f.proxyKey.trim(), avKey: f.avKey.trim(), newsKey: f.newsKey.trim() };
   },
-  holding: f => B.addHolding(S, f.accountId, f.isin, f.date, decimal(f.qty), parseEur(f.cost)),
+  holding: f => {
+    const qty = decimal(f.qty), cost = parseEur(f.cost), q = S.quotes[f.isin], i = S.instruments.find(x => x.isin === f.isin);
+    // Test A: a « total cost » far from quantity × price is probably a price per share (or the reverse): ask, never guess
+    const now = q && (i.currency === 'EUR' ? q.price * 100 : S.fx[i.currency] ? (q.price * 100) / S.fx[i.currency].rate : null);
+    const ratio = now ? cost / (qty * now) : 1;
+    if ((ratio < 0.2 || ratio > 5) && !confirm(`${eur(cost)} pour ${num(qty)} part(s), soit ${eur(Math.round(cost / qty))} par part, alors que le cours est d’environ ${eur(Math.round(now))}.\n`
+      + `Avez-vous bien saisi le prix de revient TOTAL (et non par part) ? OK pour enregistrer tel quel, Annuler pour corriger.`)) throw new Error('Saisie annulée : corrigez le prix de revient total.');
+    B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
+  },
+  split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {
     const reserve = parseEur(f.reserve), globalCap = parseEur(f.globalCap), alertPct = Number(f.alertPct), lowSpendable = parseEur(f.lowSpendable);

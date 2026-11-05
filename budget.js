@@ -319,21 +319,33 @@ const stamp = s => (s.seq = (s.seq ?? 0) + 1);
 
 // Average-cost positions per account and instrument; cost in cents, fees included.
 // An account with a broker snapshot starts from it: only its trades dated after the snapshot are added.
-export function positions(s) {
+// A split multiplies the quantity and leaves the total cost unchanged; a sale books its realized gain against average cost.
+function book(s) {
   const snaps = s.snapshots ?? {}, map = new Map();
-  for (const [accountId, sn] of Object.entries(snaps)) for (const l of sn.lines) map.set(`${accountId}|${l.isin}`, { accountId, isin: l.isin, qty: l.qty, cost: l.cost });
+  for (const [accountId, sn] of Object.entries(snaps)) for (const l of sn.lines) map.set(`${accountId}|${l.isin}`, { accountId, isin: l.isin, qty: l.qty, cost: l.cost, realized: 0 });
   const counted = o => {
     const sn = snaps[o.accountId];
-    return o.kind === 'invest' && o.isin && o.qty && (!sn || o.date > sn.date || (o.seq ?? 0) > (sn.seq ?? 0)); // recorded after the import: not in it
+    return o.kind === 'invest' && o.isin && (o.qty || o.split) && (!sn || o.date > sn.date || (o.seq ?? 0) > (sn.seq ?? 0)); // recorded after the import: not in it
   };
   for (const o of s.ops.filter(counted).sort((a, b) => a.date.localeCompare(b.date))) {
-    const k = `${o.accountId}|${o.isin}`, p = map.get(k) ?? { accountId: o.accountId, isin: o.isin, qty: 0, cost: 0 };
-    if (o.qty > 0) p.cost += o.cost ?? -o.amount;
-    else p.cost -= p.qty > 0 ? Math.round((p.cost * -o.qty) / p.qty) : 0;
-    p.qty = Math.round((p.qty + o.qty) * 1e6) / 1e6;
+    const k = `${o.accountId}|${o.isin}`, p = map.get(k) ?? { accountId: o.accountId, isin: o.isin, qty: 0, cost: 0, realized: 0 };
+    if (o.split) p.qty = Math.round(p.qty * o.split * 1e6) / 1e6;
+    else {
+      if (o.qty > 0) p.cost += o.cost ?? -o.amount;
+      else { const out = p.qty > 0 ? Math.round((p.cost * -o.qty) / p.qty) : 0; p.cost -= out; p.realized += o.amount - out; }
+      p.qty = Math.round((p.qty + o.qty) * 1e6) / 1e6;
+    }
     map.set(k, p);
   }
-  return [...map.values()].filter(p => p.qty > 0);
+  return [...map.values()];
+}
+export const positions = s => book(s).filter(p => p.qty > 0).map(({ accountId, isin, qty, cost }) => ({ accountId, isin, qty, cost }));
+export const realizedGain = (s, isin) => book(s).filter(p => p.isin === isin).reduce((a, p) => a + p.realized, 0);
+
+export function addSplit(s, accountId, isin, date, ratio) {
+  if (!(ratio > 0) || ratio === 1) throw new Error('Ratio invalide : pour une division « 10 pour 1 », indiquez 10');
+  if (!positions(s).some(p => p.accountId === accountId && p.isin === isin)) throw new Error('Aucune position sur ce compte');
+  s.ops.push({ id: uid(), accountId, date, amount: 0, kind: 'invest', isin, qty: 0, split: ratio, label: `Division ${String(ratio).replace('.', ',')} pour 1`, seq: stamp(s) });
 }
 
 // shortcut: weekends only, exchange holidays ignored — a quote may look stale one day too early.
@@ -488,10 +500,13 @@ export function suggestions(s, today) {
         add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`);
       }
     }
+    // concentration limit per line: above it, never « Renforcer », whatever the other signals say
+    const overCap = isHeld && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
+    if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`);
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
     const action = notable.length ? 'À examiner'
-      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || score <= -2 ? 'Alléger' : score >= 2 ? 'Renforcer' : 'Conserver')
+      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || score <= -2 ? 'Alléger' : score >= 2 && !overCap ? 'Renforcer' : 'Conserver')
         : score >= 2 ? 'Acheter' : 'Attendre';
     return { ...base, action, score };
   });
@@ -513,7 +528,9 @@ export function suggestions(s, today) {
       const raw = (price * 100 * rest) / rate, unit = Math.ceil(Math.round(raw * 1e6) / 1e6); // drop float noise (561.2 * 100 = 56120.000000001)
       // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
       const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);
-      const limit = known ? Math.min(left, cash) : left;
+      // never buy so much that the line would pass the concentration limit
+      const room = p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
+      const limit = Math.max(0, Math.min(known ? Math.min(left, cash) : left, room));
       const qty = a.fractional ? Math.max(0, Math.floor(((limit - fixed) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - fixed) / unit));
       const total = qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + fixed : 0;
       return { a, limit, qty, unit, total, fees: qty ? total - Math.round((qty * price * 100) / rate) : 0,
