@@ -407,6 +407,15 @@ export function addDecision(s, today, isin, action, note = '', verdict = null) {
   (s.journal ??= []).push(d);
   return d;
 }
+// Automatic journal: each new buy or sell advice of the tool is kept with its price, then checked against later prices.
+const SIDE = { Acheter: 'achat', Renforcer: 'achat', Alléger: 'vente', Vendre: 'vente' };
+export function logVerdicts(s, today) {
+  for (const x of suggestions(s, today)) {
+    if (x.suspended || !SIDE[x.action] || !s.quotes[x.isin]) continue;
+    const last = (s.journal ?? []).filter(d => d.isin === x.isin).at(-1);
+    if (last?.verdict !== x.action) addDecision(s, today, x.isin, SIDE[x.action], '', x.action);
+  }
+}
 export const deleteDecision = (s, id) => { s.journal = s.journal.filter(d => d.id !== id); };
 // change since the decision, and whether it went the way the decision bet on (buying wanted a rise, selling or skipping a fall)
 export const journalReview = s => (s.journal ?? []).map(d => {

@@ -718,3 +718,14 @@ test('Closed-app watch list: max-loss level per share in the listing currency, n
   assert.deepEqual(w[0].rules.map(r => r.below), [80]); // 100 € per share, 20 % max loss
   assert.ok(!JSON.stringify(w).includes('100000'));
 });
+
+test('Automatic journal: each buy or sell advice is logged once with its price, again only when the advice changes', () => {
+  const d = B.validateState(B.demoState(T)), act = B.suggestions(d, T).filter(x => !x.suspended && ['Acheter', 'Renforcer', 'Alléger', 'Vendre'].includes(x.action));
+  assert.ok(act.length > 0);
+  B.logVerdicts(d, T); B.logVerdicts(d, T);
+  assert.equal(d.journal.length, act.length);
+  const e = d.journal.find(j => j.isin === act[0].isin);
+  assert.equal(e.verdict, act[0].action); assert.equal(e.price, d.quotes[act[0].isin].price);
+  d.journal.at(-1).verdict = 'Conserver'; // a different earlier advice: the current one is logged again
+  B.logVerdicts(d, T); assert.equal(d.journal.length, act.length + 1);
+});

@@ -83,8 +83,8 @@ const onboarding = () => card('Bienvenue 👋', empty('Aucun compte pour l’ins
 // an account that is neither current nor savings and has no type yet is a brokerage account (created before types existed)
 const accKind = a => (a.type === 'PEA' ? 'pea' : a.type === 'CTO' ? 'cto' : a.savings ? 'epargne' : a.liquid ? 'courant' : 'cto');
 // one journal entry: decision, price then → now, and whether it went the way the decision bet on
-const decisionRow = (d, withName) => `<div class="op"><div class="l"><b>${B.DECISIONS[d.action]}</b>${withName ? ` · ${esc(S.instruments.find(i => i.isin === d.isin)?.name ?? d.isin)}` : ''}`
-  + `<div class="muted">${shortDate(d.date)}${d.verdict ? ` · l’outil disait ${esc(d.verdict)}` : ''}${d.price ? ` · cours ${num(d.price)}` : ''}${d.note ? ` · « ${esc(d.note)} »` : ''}</div></div>`
+const decisionRow = (d, withName) => `<div class="op"><div class="l"><b>${esc(d.verdict ?? B.DECISIONS[d.action])}</b>${withName ? ` · ${esc(S.instruments.find(i => i.isin === d.isin)?.name ?? d.isin)}` : ''}`
+  + `<div class="muted">${shortDate(d.date)}${d.price ? ` · cours ${num(d.price)}` : ''}${d.note ? ` · « ${esc(d.note)} »` : ''}</div></div>`
   + `<div style="text-align:right">${d.change == null ? '' : `<span class="${d.change < 0 ? 'neg' : 'pos'}">${d.change > 0 ? '+' : ''}${d.change.toFixed(1).replace('.', ',')} %</span>`}`
   + `<div class="muted">${d.right == null ? '' : d.right ? '✅ bien vu' : '❌ raté'}</div>${btn('delDecision', d.id, '✕')}</div></div>`;
 const chip = (name, value, label, on) => `<label><input type="radio" name="${name}" value="${esc(value)}"${on ? ' checked' : ''}><span>${label}</span></label>`;
@@ -326,19 +326,14 @@ const views = {
             [`Volatilité : ${Math.round(ind.vol)} % par an`, 'Amplitude habituelle des variations. Sous 20 % : calme ; au-dessus de 40 % : très agité.'],
             [`Baisse depuis le plus haut : ${ind.drawdown.toFixed(1).replace('.', ',')} %`, `Plus haut ${ind.hi.toFixed(2).replace('.', ',')} · plus bas ${ind.lo.toFixed(2).replace('.', ',')} sur ${ind.days >= 250 ? '52 semaines' : `${ind.days} séances`}.`]]
             .map(([v, e]) => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${v}</b><div class="muted">${e}</div></div>`).join('') + '</details>'))(B.indicators(S, isin)))
-        + ((sim => `<details style="margin-top:10px"${sim ? ' open' : ''}><summary><b>🧮 Simuler un achat</b></summary><form data-form="simulate"><input type="hidden" name="isin" value="${esc(isin)}">
-          <div class="grid2"><label>Nombre de parts<input name="qty" inputmode="decimal" value="${esc(sim?.qty ?? '1')}"></label><label>Prix (${i.currency})<input name="price" inputmode="decimal" value="${esc(sim?.price ?? (q ? String(q.price).replace('.', ',') : ''))}"></label></div>
-          <button class="ghost">Calculer</button></form>`
-          + (sim ? '<div style="margin-top:10px">' + [['Parts après l’achat', `${num(sim.r.held)} → <b>${num(sim.r.newQty)}</b>`], ['Coût de l’achat (frais estimés inclus)', eur(sim.r.add)],
-            ['Nouveau prix de revient par part', `<b>${eur(Math.round(sim.r.pru))}</b>`], ['Poids dans le portefeuille', `${sim.r.weightBefore.toFixed(1).replace('.', ',')} % → <b>${sim.r.weightAfter.toFixed(1).replace('.', ',')} %</b>`]]
+        + ((r => (r ? `<details style="margin-top:10px"><summary><b>🧮 Si vous suivez l’avis : ${num(x.buy.qty)} part(s)</b></summary><div style="margin-top:10px">` + [['Parts après l’achat', `${num(r.held)} → <b>${num(r.newQty)}</b>`], ['Coût de l’achat (frais estimés inclus)', eur(r.add)],
+            ['Nouveau prix de revient par part', `<b>${eur(Math.round(r.pru))}</b>`], ['Poids dans le portefeuille', `${r.weightBefore.toFixed(1).replace('.', ',')} % → <b>${r.weightAfter.toFixed(1).replace('.', ',')} %</b>`]]
             .map(([l, v]) => `<div class="row"><span>${l}</span><span>${v}</span></div>`).join('')
-            + `<div class="day">Si ensuite le cours varie de…</div>` + sim.r.at.map(x => `<div class="row"><span>${x.change > 0 ? '+' : ''}${x.change} %</span>${money(x.gain)}</div>`).join('')
-            + empty('Gain ou perte sur toute la ligne après cet achat. Simulation seulement : rien n’est enregistré.') + '</div>' : '') + '</details>')(view.sim?.isin === isin ? view.sim : null))
-        + `<details style="margin-top:10px"${S.journal?.some(d => d.isin === isin) ? ' open' : ''}><summary><b>📓 Ma décision</b></summary><form data-form="decision"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="verdict" value="${esc(x?.action ?? '')}">
-          <div class="chips">${Object.entries(B.DECISIONS).map(([k, l], n) => chip('action', k, l, !n)).join('')}</div>
-          <input name="note" placeholder="Pourquoi ? (facultatif)" maxlength="200"><button class="ghost">Noter</button>
-          ${empty('Le cours et l’avis de l’outil sont gardés avec la date : vous verrez plus tard si c’était bien vu.')}</form>`
-          + B.journalReview(S).filter(d => d.isin === isin).map(d => decisionRow(d)).join('') + '</details>'
+            + `<div class="day">Si ensuite le cours varie de…</div>` + r.at.map(c => `<div class="row"><span>${c.change > 0 ? '+' : ''}${c.change} %</span>${money(c.gain)}</div>`).join('')
+            + empty('Gain ou perte sur toute la ligne après cet achat. Calcul seulement : rien n’est enregistré.') + '</div></details>' : ''))(
+          x?.buy && q ? (() => { try { return B.simulate(S, t, isin, x.buy.qty, q.price, x.buy.fees); } catch { return null; } })() : null))
+        + ((ds => (ds.length ? `<details style="margin-top:10px"><summary><b>📓 Avis passés de l’outil · ${ds.length}</b></summary>${ds.map(d => decisionRow(d)).join('')}</details>` : ''))(
+          B.journalReview(S).filter(d => d.isin === isin)))
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
@@ -387,7 +382,7 @@ const views = {
           : noAdvice ? `<b class="warn">${noAdvice} titre(s) sans avis</b>` : held.length ? '<b class="good">Tous vos titres ont un avis ✓</b>' : '<b>Bourse</b>'}</span>`
         + (ready ? btn('refreshAll', '', 'Actualiser', 'small') : '') + '</div>'
         + (!ready ? empty('Ouvrez « Réglages bourse » en bas de page : 5 minutes de configuration, une seule fois.') : '')
-        + (lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
+        + (view.refreshing ? empty('⏳ Actualisation des cours, actualités et avis…') : lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
         + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '')
         + `<details><summary class="muted">Comment l’outil décide</summary><div class="muted">
           Pour chaque titre, il additionne des points : <b>+1/−1</b> si le cours est au-dessus/en dessous de sa moyenne des 50 derniers jours,
@@ -432,9 +427,9 @@ const views = {
       + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
         + (lines.some(l => l.inst.currency === 'USD') ? `<div class="row"><span>Dollar −10 % (titres en $)</span>${money(-B.stressLoss(S, t, 0, 10))}</div>` : '')
         + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. L’encaisse n’est pas comptée.')) : '')
-      + (S.journal?.length ? fold('journal', `📓 Mon journal · ${S.journal.length}`, ((r, ok) => (ok.length ? empty(`${ok.filter(d => d.right).length} décision(s) bien vue(s) sur ${ok.length} jugeable(s).`) : '')
+      + (S.journal?.length ? fold('journal', `📓 Avis de l’outil, vérifiés · ${S.journal.length}`, ((r, ok) => (ok.length ? empty(`${ok.filter(d => d.right).length} avis bien vu(s) sur ${ok.length} déjà jugeable(s).`) : '')
         + r.map(d => decisionRow(d, true)).join(''))(B.journalReview(S), B.journalReview(S).filter(d => d.right != null))
-        + empty('« Bien vu » : le cours a monté de plus de 2 % après un achat, ou baissé après une vente ou un titre laissé passer. Le cours est dans la devise du titre.')) : '')
+        + empty('Chaque avis Acheter, Renforcer, Alléger ou Vendre est noté tout seul avec le cours du jour. « Bien vu » : le cours a ensuite monté de plus de 2 % après un avis d’achat, ou baissé après un avis de vente.')) : '')
       + fold('profile', 'Mon profil et mes cibles', `<form data-form="profile">
         <div class="muted">Ma façon d’investir</div>
         <div class="chips">${chip('style', 'long', '🌳 Long terme : je garde', pf.style !== 'actif')}${chip('style', 'actif', '🔄 Actif : je vends les fortes hausses, je rachète les baisses', pf.style === 'actif')}</div>
@@ -457,10 +452,9 @@ const views = {
         <label>Clé Marketaux (actualités et idées)<input type="password" name="newsKey" value="${esc(mk.newsKey)}" autocomplete="off"${mk.newsInWorker ? ' placeholder="Rangée dans votre service ✓"' : ''}></label>
         <details><summary class="muted">Sans service de cours</summary><label>Clé Alpha Vantage (25 cours par jour)<input type="password" name="avKey" value="${esc(mk.avKey)}" autocomplete="off"></label></details>
         <div class="grid2"><button class="ghost">Enregistrer</button>${btn('testKeys', '', 'Tester', 'ghost')}</div></form>
-        ${mk.proxyUrl && mk.newsKey ? `<div style="margin-top:10px">${btn('moveNewsKey', '', '🔒 Ranger la clé Marketaux dans mon service', 'ghost')}${empty('Elle ne sera plus stockée sur le téléphone.')}</div>` : ''}
         ${mk.proxyUrl ? `<div style="margin-top:12px"><b>🔔 Alertes même appli fermée</b>${mk.push
           ? `<div class="muted">Actives : votre service vérifie vos titres toutes les 30 min en semaine (seuil de perte, stop suiveur, forte hausse, ±6 % sur une séance).</div><div class="grid2">${btn('pushTest', '', 'Envoyer un essai', 'ghost')}${btn('pushOff', '', 'Désactiver', 'ghost')}</div>`
-          : `<div class="muted">Votre service reçoit seulement les noms des titres et les cours à surveiller : ni quantités ni montants.</div>${btn('pushOn', '', 'Activer', 'ghost')}`}</div>` : ''}
+          : `<div class="muted">S’activent toutes seules dès que les notifications sont autorisées. Votre service reçoit seulement les noms des titres et les cours à surveiller : ni quantités ni montants.</div>${btn('pushOn', '', 'Autoriser les notifications', 'ghost')}`}</div>` : ''}
         <details style="margin-top:8px"><summary><b>Créer le service de cours (5 min, gratuit)</b></summary><div class="muted">
           1. Créez un compte sur <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener noreferrer">dash.cloudflare.com</a>.<br>
           2. « Workers et Pages » → « Créer » → « Hello World » → donnez-lui un nom (ex. prix-budget) → « Déployer ».<br>
@@ -576,7 +570,11 @@ const actions = {
       errs.push(...await refreshNews(S, t));
       try { errs.push(...await discover(S, t)); } catch (e) { errs.push(`Recherche d’idées : ${e.message}`); }
     }
-    const m = S.settings.market, watch = JSON.stringify(B.watchList(S, t));
+    const m = S.settings.market;
+    if (m.proxyUrl && m.newsKey) try { await actions.moveNewsKey(true); } catch (e) { errs.push(`Clé Marketaux : ${e.message}`); }
+    if (!m.push && 'PushManager' in window && Notification.permission === 'granted') try { await actions.pushOn(true); } catch (e) { errs.push(`Alertes appli fermée : ${e.message}`); }
+    B.logVerdicts(S, t);
+    const watch = JSON.stringify(B.watchList(S, t));
     if (m.push && watch !== m.pushSent) { // the closed-app alerts follow the portfolio
       try { await workerCall(S, '/push/watch', { watch: JSON.parse(watch) }); m.pushSent = watch; } catch (e) { errs.push(`Alertes appli fermée : ${e.message}`); }
     }
@@ -591,13 +589,12 @@ const actions = {
   },
   findSymbol: async isin => { const i = S.instruments.find(x => x.isin === isin); view.search = { q: i.name, forIsin: isin, results: await searchSymbols(S, i.name) }; scrollTo(0, 0); },
   cancelSearch: () => { view.search = null; },
-  moveNewsKey: async () => {
+  moveNewsKey: async () => { // done by the refresh: the key goes to the user's service and leaves the phone
     const m = S.settings.market;
     await workerCall(S, '/config', { newsKey: m.newsKey });
     m.newsInWorker = true; m.newsKey = '';
-    try { await checkNewsKey(S); alert('Clé rangée dans votre service, et testée : OK ✓'); } catch (e) { alert(`Clé rangée, mais le test échoue : ${plain(e.message)}`); }
   },
-  pushOn: async () => {
+  pushOn: async quiet => {
     if (!('PushManager' in window)) throw new Error('Ce navigateur ne sait pas recevoir d’alertes appli fermée. Installez l’appli sur l’écran d’accueil (Chrome).');
     if (await Notification.requestPermission() !== 'granted') throw new Error('Notifications refusées : autorisez-les dans les réglages du téléphone.');
     const { publicKey } = await workerCall(S, '/push/key'), reg = await navigator.serviceWorker.ready;
@@ -605,7 +602,7 @@ const actions = {
     const watch = B.watchList(S, today()), m = S.settings.market;
     await workerCall(S, '/push/watch', { subscription: sub.toJSON(), watch });
     Object.assign(m, { push: true, pushSent: JSON.stringify(watch) });
-    alert(`Alertes activées : ${watch.length} titre(s) surveillé(s). Touchez « Envoyer un essai » pour vérifier.`);
+    if (quiet !== true) alert(`Alertes activées : ${watch.length} titre(s) surveillé(s).`);
   },
   pushTest: async () => { await workerCall(S, '/push/test'); },
   pushOff: async () => {
@@ -701,8 +698,6 @@ const forms = {
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
-  decision: f => B.addDecision(S, today(), f.isin, f.action, f.note, f.verdict || null),
-  simulate: f => { view.sim = { isin: f.isin, qty: f.qty, price: f.price, r: B.simulate(S, today(), f.isin, decimal(f.qty), decimal(f.price), S.settings.profile.fee) }; },
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {
     const reserve = parseEur(f.reserve), globalCap = parseEur(f.globalCap), alertPct = Number(f.alertPct), lowSpendable = parseEur(f.lowSpendable);
@@ -824,3 +819,14 @@ addEventListener('popstate', e => {
 });
 render();
 notify();
+async function autoRefresh() {
+  const m = S.settings.market, last = Date.parse(S.lastRefresh?.at ?? 0);
+  if (view.refreshing || !navigator.onLine || !m.enabled || !(m.proxyUrl || m.avKey) || Date.now() - last < 30 * 60e3) return;
+  const calm = () => !view.sheet && !document.activeElement?.matches('input, textarea, select'); // never redraw over typing
+  view.refreshing = true; if (calm()) render();
+  // no pop-up: problems are listed on the Bourse screen
+  try { await actions.refreshAll(); } catch (e) { S.lastRefresh = { at: new Date().toISOString(), errors: [plain(e.message)] }; }
+  view.refreshing = false; save(); if (calm()) render(); notify();
+}
+autoRefresh();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') autoRefresh(); });
