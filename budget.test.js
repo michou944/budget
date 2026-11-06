@@ -280,6 +280,10 @@ test('Own price service: listing found from the ISIN (OpenFIGI for US ISINs), cu
   // a wrong password is reported once, in plain words
   const denied = await refreshMarket(withInstrumentsOn(s.settings.market), T, async u => (u.includes('frankfurter') ? { ok: true, json: async () => ({ rates: {} }) } : { ok: false, status: 401 }));
   assert.deepEqual(denied, ['World : Service de cours : mot de passe refusé']);
+  // a price already « fetched today » but old is fetched again at the next refresh (it used to stay frozen all day)
+  s.quotes[AAPL] = { ...s.quotes[AAPL], asOf: '2026-10-30', fetchedAt: T }; seen.length = 0;
+  await refreshMarket(s, T, fake);
+  assert.ok(seen.some(([u]) => u.startsWith('/chart'))); assert.equal(s.quotes[AAPL].asOf, s.history[AAPL].at(-1)[0]);
 });
 const withInstrumentsOn = market => { const s = withInstruments(); Object.assign(s.settings.market, market); return s; };
 

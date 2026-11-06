@@ -109,7 +109,7 @@ export async function refreshMarket(s, today, fetchFn = fetch) {
   if (!m.enabled) throw new Error('Données de marché désactivées');
   await refreshFx(s, today, fetchFn, errors);
   if (proxyOn(s)) { // own service: every title, every day, no quota
-    for (const i of byImportance(s, today).filter(i => s.quotes[i.isin]?.fetchedAt !== today)) {
+    for (const i of byImportance(s, today)) { // no quota: every refresh takes the live price (the last daily bar moves during the session)
       try {
         const sym = await yahooSymbol(s, i, fetchFn);
         if (!sym) { errors.push(`${i.name} : cotation introuvable`); continue; }
