@@ -743,13 +743,12 @@ test('Account total: cash plus its own securities at the latest price, other acc
   assert.equal(B.accountTotal(s, other, T).securities, 0);
 });
 
-test('Dividends: cash added to the broker account, counted per title and per year, imported ones included', () => {
-  const s = withInstruments(), b = s.accounts.find(a => a.id === 'b'), before = B.balance(s, b);
-  B.addDividend(s, 'b', ETF, '2026-06-10', 1250);
-  s.ops.push({ id: 'x', accountId: 'b', date: '2025-12-01', amount: 300, kind: 'invest', label: `Dividende ${s.instruments.find(i => i.isin === AAPL).name}` });
-  assert.throws(() => B.addDividend(s, 'b', ETF, T, 0));
-  assert.equal(B.balance(s, b), before + 1550);
-  assert.equal(B.dividends(s, { isin: ETF }).length, 1); assert.equal(B.dividends(s, { isin: AAPL })[0].amount, 300);
-  assert.deepEqual(B.dividends(s, { year: '2026' }).map(o => o.amount), [1250]);
-  assert.ok(!B.positions(s).some(p => p.qty === 0)); // a dividend is not a trade
+test('Cagnotte: the cash typed from the bank becomes the account balance, outside the household budget', () => {
+  const s = B.demoState(T), a = s.accounts[0], before = B.balance(s, a), m = B.monthStats(s, T.slice(0, 7));
+  assert.equal(B.setCash(s, a.id, T, before + 1250), 1250);
+  assert.equal(B.balance(s, a), before + 1250);
+  assert.equal(B.setCash(s, a.id, T, before + 1250), 0); // same amount: nothing added
+  const n = s.ops.length; B.setCash(s, a.id, T, before - 500); assert.equal(B.balance(s, a), before - 500); assert.equal(s.ops.length, n + 1);
+  assert.deepEqual([B.monthStats(s, T.slice(0, 7)).income, B.monthStats(s, T.slice(0, 7)).spent], [m.income, m.spent]);
+  assert.throws(() => B.setCash(s, 'nope', T, 0));
 });

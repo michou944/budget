@@ -287,7 +287,8 @@ const views = {
     const left = envs.reduce((a, e) => a + B.envelopeLeft(S, e), 0);
     const brokers = S.accounts.filter(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
     const total = ls => ls.reduce((a, l) => a + (l.value ?? 0), 0), missing = lines.filter(l => l.value == null).length;
-    const inst = isin => S.instruments.find(i => i.isin === isin);
+    const inst = isin => S.instruments.find(i => i.isin === isin), sr0 = view.search && !view.search.forIsin;
+    const cash = S.accounts.filter(a => ['cto', 'pea'].includes(accKind(a)) || brokers.includes(a));
     const quoteInfo = (q, i) => (q ? `${num(q.price)} ${i.currency} · ${q.asOf} · ${esc(q.source)}` : 'cours indisponible');
     const staleTag = on => (on ? '<span class="tag warn">périmé</span>' : '');
     const cls = { Acheter: 'good', Renforcer: 'good', Attendre: 'muted', Alléger: 'warn', Vendre: 'bad', 'À examiner': 'warn', Suspendu: 'muted' };
@@ -340,32 +341,28 @@ const views = {
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
         + ((r => (r ? `<div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(r)}</div>` : ''))(B.realizedGain(S, isin)))
-        + ((own, ds) => (own.length ? `<details style="margin-top:8px"${view.divOpen === isin ? ' open' : ''}><summary class="muted">💶 Dividendes${ds.length ? ` · ${eur(ds.reduce((n, o) => n + o.amount, 0))} reçus` : ''}</summary>`
-          + `<form data-form="dividend"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="date" value="${t}">`
-          + (own.length > 1 ? `<div class="chips">${own.map((l, n) => chip('accountId', l.accountId, esc(accName(l.accountId)), !n)).join('')}</div>` : `<input type="hidden" name="accountId" value="${esc(own[0].accountId)}">`)
-          + `<div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant reçu (net) €" required aria-label="Montant du dividende"><button class="ghost">Ajouter</button></div></form>`
-          + ds.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))}</span>${money(o.amount)}</div>`).join('') + '</details>' : ''))(
-          lines.filter(l => l.isin === isin), B.dividends(S, { isin }))
         + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
           + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
           S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
-        + (lines.some(l => l.isin === isin) ? `<details style="margin-top:8px"><summary class="muted">Déclarer une division (split)</summary><form data-form="split">
-          <input type="hidden" name="isin" value="${esc(isin)}"><select name="accountId">${opts(lines.filter(l => l.isin === isin).map(l => [l.accountId, accName(l.accountId)]))}</select>
-          <div class="grid2"><label>Ratio (10 pour « 10 pour 1 »)<input name="ratio" inputmode="decimal" required></label><label>Date<input type="date" name="date" value="${t}" required></label></div>
-          <button class="ghost">Enregistrer la division</button>${empty('La quantité est multipliée, le coût total ne change pas. Inutile si l’export de votre courtier est postérieur à la division.')}</form></details>` : '')
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
           + `<div class="muted">${esc(n.source)} · ${n.publishedAt}</div></div></div>`).join('') || empty('Aucune actualité.'))
+        + '<details style="margin-top:12px"><summary><b>⚙️ Gérer ce titre</b> <span class="muted">vente, division, cotation</span></summary>'
         + lines.filter(l => l.isin === isin).map(l => `<details style="margin-top:8px"><summary><b>J’ai vendu</b> <span class="muted">sur ${esc(accName(l.accountId))}</span></summary>
           <form data-form="sale"><input type="hidden" name="pos" value="${esc(`${l.accountId}|${isin}`)}">
           <div class="grid2"><label>Quantité vendue<input name="qty" inputmode="decimal" value="${num(l.qty)}"></label><label>Montant net reçu (€)<input name="amount" inputmode="decimal" required></label></div>
           <input type="date" name="date" value="${t}" required><button>Enregistrer la vente</button>
           ${empty('Quantité pré-remplie avec tout ce que vous détenez : changez-la si vous avez vendu une partie.')}</form></details>`).join('')
+        + (lines.some(l => l.isin === isin) ? `<details style="margin-top:8px"><summary class="muted">Déclarer une division (split)</summary><form data-form="split">
+          <input type="hidden" name="isin" value="${esc(isin)}"><select name="accountId">${opts(lines.filter(l => l.isin === isin).map(l => [l.accountId, accName(l.accountId)]))}</select>
+          <div class="grid2"><label>Ratio (10 pour « 10 pour 1 »)<input name="ratio" inputmode="decimal" required></label><label>Date<input type="date" name="date" value="${t}" required></label></div>
+          <button class="ghost">Enregistrer la division</button>${empty('La quantité est multipliée, le coût total ne change pas. Inutile si l’export de votre courtier est postérieur à la division.')}</form></details>` : '')
         + `<div class="grid2" style="margin-top:8px">${btn('findSymbol', isin, i.symbol ? 'Changer de cotation' : 'Trouver le cours', 'ghost')}${btn('delInst', isin, noOps ? 'Ne plus suivre' : 'Supprimer ce titre', 'danger')}</div>`
         + `<details style="margin-top:8px"><summary class="muted">Détails techniques</summary><form data-form="instrument"><input type="hidden" name="isin" value="${esc(isin)}">
           <div class="grid2"><input name="name" value="${esc(i.name)}" aria-label="Nom"><input name="symbol" value="${esc(i.symbol)}" placeholder="Symbole de cours" aria-label="Symbole"></div>
           <div class="grid2"><input name="currency" value="${esc(i.currency)}" maxlength="3" aria-label="Devise"><input name="place" value="${esc(i.place)}" placeholder="Place" aria-label="Place"></div>
-          <button class="ghost">Enregistrer</button></form></details>`);
+          <button class="ghost">Enregistrer</button></form></details>`
+        + '</details>');
     };
 
     const searchCard = () => {
@@ -406,6 +403,10 @@ const views = {
           || empty(ready && newsOn(mk) ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (« Réglages bourse » plus bas).'))
         + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
         + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
+      + (cash.length ? card(`💰 Ma cagnotte · ${eur(cash.reduce((n, x) => n + B.balance(S, x), 0))}`, `<form data-form="cash"><input type="hidden" name="date" value="${t}">`
+        + cash.map(x => `<label>${esc(x.name)} <span class="muted">· espèces</span><input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(B.balance(S, x))}"></label>`).join('')
+        + `<button>Mettre à jour mes comptes</button>${empty('Recopiez les espèces affichées par chaque banque (dividendes compris). L’écart est enregistré dans Mouvements, hors budget du foyer.')}</form>`) : '')
+      + `<details class="card fold" data-fold="more"${!ready || sr0 || view.trades || view.snap || view.open.has('more') ? ' open' : ''}><summary>⚙️ Autres options</summary>`
       + (view.search?.forIsin ? '' : searchCard())
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
         (envs.map(e => `<div class="op"><div class="l">${esc(e.label)}<div class="muted">${eur(e.amount)} affectés · ${eur(B.envelopeUsed(S, e.id))} achetés${e.released ? ' · reliquat libéré' : ''}</div></div>`
@@ -432,9 +433,6 @@ const views = {
         return `<h2 style="margin-top:10px">${esc(a.name)} · ${eur(B.accountTotal(S, a, t).total)}</h2>` + row('Encaisse', B.balance(S, a))
           + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
       }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
-      + ((y, ds) => (ds.length ? fold('divs', `💶 Dividendes ${y} · ${eur(ds.reduce((n, o) => n + o.amount, 0))}`,
-        ds.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(o.label.replace(/^Dividende /, ''))}</span>${money(o.amount)}</div>`).join('')
-        + empty('Ajoutés depuis la fiche de chaque titre, ou importés avec le relevé Trade Republic. Ils s’ajoutent à l’encaisse du compte.')) : ''))(t.slice(0, 4), B.dividends(S, { year: t.slice(0, 4) }))
       + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
         + (lines.some(l => l.inst.currency === 'USD') ? `<div class="row"><span>Dollar −10 % (titres en $)</span>${money(-B.stressLoss(S, t, 0, 10))}</div>` : '')
         + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. L’encaisse n’est pas comptée.')) : '')
@@ -475,7 +473,8 @@ const views = {
         ${empty('Envoyés : à votre service, les ISIN et symboles suivis (et, si les alertes sont activées, les cours seuils de vos titres et l’adresse de notification du téléphone) ; à Marketaux, votre clé et les noms suivis. Jamais : quantités, montants, comptes, opérations.')}
         ${S.requestLog.slice(0, 10).map(r => `<div class="muted">${r.at.slice(0, 16).replace('T', ' ')} · ${esc(r.host)} · ${esc(r.symbols.join(', '))}</div>`).join('')}`, !ready)
       + (S.instruments.length ? fold('manual', 'Saisir un cours à la main', `<form data-form="quote"><select name="isin">${instOpts(S.instruments)}</select>
-        <div class="grid2"><input name="price" inputmode="decimal" placeholder="Cours (devise de cotation)" required><input type="date" name="date" value="${t}" required></div><button class="ghost">Enregistrer le cours</button></form>`) : '');
+        <div class="grid2"><input name="price" inputmode="decimal" placeholder="Cours (devise de cotation)" required><input type="date" name="date" value="${t}" required></div><button class="ghost">Enregistrer le cours</button></form>`) : '')
+      + '</details>';
   },
 
   settings() {
@@ -708,7 +707,7 @@ const forms = {
       + `Avez-vous bien saisi le prix de revient TOTAL (et non par part) ? OK pour enregistrer tel quel, Annuler pour corriger.`)) throw new Error('Saisie annulée : corrigez le prix de revient total.');
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
-  dividend: f => { B.addDividend(S, f.accountId, f.isin, f.date, parseEur(f.amount)); view.divOpen = f.isin; },
+  cash: f => { for (const [k, v] of Object.entries(f)) if (k.startsWith('c_') && String(v).trim()) B.setCash(S, k.slice(2), f.date, parseEur(v)); },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {
