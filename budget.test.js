@@ -742,3 +742,14 @@ test('Account total: cash plus its own securities at the latest price, other acc
   const other = s.accounts.find(a => a.id !== 'b');
   assert.equal(B.accountTotal(s, other, T).securities, 0);
 });
+
+test('Dividends: cash added to the broker account, counted per title and per year, imported ones included', () => {
+  const s = withInstruments(), b = s.accounts.find(a => a.id === 'b'), before = B.balance(s, b);
+  B.addDividend(s, 'b', ETF, '2026-06-10', 1250);
+  s.ops.push({ id: 'x', accountId: 'b', date: '2025-12-01', amount: 300, kind: 'invest', label: `Dividende ${s.instruments.find(i => i.isin === AAPL).name}` });
+  assert.throws(() => B.addDividend(s, 'b', ETF, T, 0));
+  assert.equal(B.balance(s, b), before + 1550);
+  assert.equal(B.dividends(s, { isin: ETF }).length, 1); assert.equal(B.dividends(s, { isin: AAPL })[0].amount, 300);
+  assert.deepEqual(B.dividends(s, { year: '2026' }).map(o => o.amount), [1250]);
+  assert.ok(!B.positions(s).some(p => p.qty === 0)); // a dividend is not a trade
+});

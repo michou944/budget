@@ -340,6 +340,12 @@ const views = {
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
         + ((r => (r ? `<div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(r)}</div>` : ''))(B.realizedGain(S, isin)))
+        + ((own, ds) => (own.length ? `<details style="margin-top:8px"${view.divOpen === isin ? ' open' : ''}><summary class="muted">💶 Dividendes${ds.length ? ` · ${eur(ds.reduce((n, o) => n + o.amount, 0))} reçus` : ''}</summary>`
+          + `<form data-form="dividend"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="date" value="${t}">`
+          + (own.length > 1 ? `<div class="chips">${own.map((l, n) => chip('accountId', l.accountId, esc(accName(l.accountId)), !n)).join('')}</div>` : `<input type="hidden" name="accountId" value="${esc(own[0].accountId)}">`)
+          + `<div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant reçu (net) €" required aria-label="Montant du dividende"><button class="ghost">Ajouter</button></div></form>`
+          + ds.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))}</span>${money(o.amount)}</div>`).join('') + '</details>' : ''))(
+          lines.filter(l => l.isin === isin), B.dividends(S, { isin }))
         + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
           + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
           S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
@@ -426,6 +432,9 @@ const views = {
         return `<h2 style="margin-top:10px">${esc(a.name)} · ${eur(B.accountTotal(S, a, t).total)}</h2>` + row('Encaisse', B.balance(S, a))
           + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
       }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
+      + ((y, ds) => (ds.length ? fold('divs', `💶 Dividendes ${y} · ${eur(ds.reduce((n, o) => n + o.amount, 0))}`,
+        ds.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(o.label.replace(/^Dividende /, ''))}</span>${money(o.amount)}</div>`).join('')
+        + empty('Ajoutés depuis la fiche de chaque titre, ou importés avec le relevé Trade Republic. Ils s’ajoutent à l’encaisse du compte.')) : ''))(t.slice(0, 4), B.dividends(S, { year: t.slice(0, 4) }))
       + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
         + (lines.some(l => l.inst.currency === 'USD') ? `<div class="row"><span>Dollar −10 % (titres en $)</span>${money(-B.stressLoss(S, t, 0, 10))}</div>` : '')
         + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. L’encaisse n’est pas comptée.')) : '')
@@ -699,6 +708,7 @@ const forms = {
       + `Avez-vous bien saisi le prix de revient TOTAL (et non par part) ? OK pour enregistrer tel quel, Annuler pour corriger.`)) throw new Error('Saisie annulée : corrigez le prix de revient total.');
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
+  dividend: f => { B.addDividend(S, f.accountId, f.isin, f.date, parseEur(f.amount)); view.divOpen = f.isin; },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
   settings: f => {

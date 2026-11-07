@@ -423,6 +423,19 @@ export const journalReview = s => (s.journal ?? []).map(d => {
   const right = change == null || d.action === 'attente' || Math.abs(change) < 2 ? null : (d.action === 'achat') === (change > 0);
   return { ...d, now: now ?? null, change, right };
 }).sort((a, b) => b.date.localeCompare(a.date));
+// Dividend received in cash on the broker account (net amount, in cents). Trade Republic ones come with its CSV import.
+export function addDividend(s, accountId, isin, date, cents) {
+  if (!(cents > 0)) throw new Error('Montant invalide');
+  const inst = s.instruments.find(i => i.isin === isin);
+  s.ops.push({ id: uid(), accountId, date, amount: cents, kind: 'invest', categoryId: null, label: `Dividende ${inst?.name ?? isin}`, dividend: isin });
+}
+// dividends received, entered here or imported (« Dividende <name> »), optionally for one title or one year
+export const dividends = (s, { isin, year } = {}) => {
+  const name = isin && s.instruments.find(i => i.isin === isin)?.name;
+  return s.ops.filter(o => !o.planned && o.amount > 0 && (o.dividend || /^Dividende /.test(o.label ?? ''))
+    && (!isin || o.dividend === isin || (!o.dividend && o.label === `Dividende ${name}`)) && (!year || o.date.startsWith(year)))
+    .sort((a, b) => b.date.localeCompare(a.date));
+};
 export function addSplit(s, accountId, isin, date, ratio) {
   if (!(ratio > 0) || ratio === 1) throw new Error('Ratio invalide : pour une division « 10 pour 1 », indiquez 10');
   if (!positions(s).some(p => p.accountId === accountId && p.isin === isin)) throw new Error('Aucune position sur ce compte');
