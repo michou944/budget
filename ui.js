@@ -87,6 +87,8 @@ const decisionRow = (d, withName) => `<div class="op"><div class="l"><b>${esc(d.
   + `<div class="muted">${shortDate(d.date)}${d.price ? ` · cours ${num(d.price)}` : ''}${d.note ? ` · « ${esc(d.note)} »` : ''}</div></div>`
   + `<div style="text-align:right">${d.change == null ? '' : `<span class="${d.change < 0 ? 'neg' : 'pos'}">${d.change > 0 ? '+' : ''}${d.change.toFixed(1).replace('.', ',')} %</span>`}`
   + `<div class="muted">${d.right == null ? '' : d.right ? '✅ bien vu' : '❌ raté'}</div>${btn('delDecision', d.id, '✕')}</div></div>`;
+// an account's amount: for a broker account, cash plus securities, like the broker's own screen
+const acctAmount = a => { const t = B.accountTotal(S, a, today()); return t.securities ? `${money(t.total)}<div class="muted" style="font-size:12px">dont titres ${eur(t.securities)}</div>` : money(t.cash); };
 const chip = (name, value, label, on) => `<label><input type="radio" name="${name}" value="${esc(value)}"${on ? ' checked' : ''}><span>${label}</span></label>`;
 const catChips = sel => `<div class="cats">${[...S.categories.map(c => [c.id, c.name]), ['', 'Aucune']].map(([id, n]) => `<label><input type="radio" name="categoryId" value="${esc(id)}"${(sel ?? '') === id ? ' checked' : ''}><span><b>${id ? catIcon(n) : '·'}</b>${esc(n)}</span></label>`).join('')}</div>`;
 const cancelBtn = '<button type="button" class="ghost" data-act="closeSheet">Annuler</button>';
@@ -237,7 +239,7 @@ const views = {
     const thisMonth = m === B.monthOf(today()), pct = st.income ? Math.min(100, Math.round((st.spent * 100) / st.income)) : 0;
     const paid = S.ops.filter(o => !o.planned && B.monthOf(o.date) === m && o.kind === 'expense').sort((a, b) => b.date.localeCompare(a.date));
     const aside = [st.reserve && `épargne prévue ${eur(st.reserve)}`, st.stock && `bourse ${eur(st.stock)}`].filter(Boolean);
-    const account = a => `<div class="op"><div class="av">${a.savings ? '🐷' : a.liquid ? '🏦' : '📈'}</div><div class="l">${esc(a.name)}<div class="muted">${esc(a.institution)}</div></div><div class="r">${money(B.balance(S, a))}</div></div>`;
+    const account = a => `<div class="op"><div class="av">${a.savings ? '🐷' : a.liquid ? '🏦' : '📈'}</div><div class="l">${esc(a.name)}<div class="muted">${esc(a.institution)}</div></div><div class="r">${acctAmount(a)}</div></div>`;
     return monthBar(false)
       + `<section class="hero"><div class="lbl">Reste à dépenser ${thisMonth ? 'ce mois-ci' : `en ${monthName(m)}`}</div><div class="big">${eur(st.spendable)}</div>`
       + (st.shortfall ? `<div style="font-weight:700">⚠️ Il manque ${eur(st.shortfall)} pour couvrir ce qui est prévu</div>` : '')
@@ -421,7 +423,7 @@ const views = {
       + fold('import', 'Importer un relevé courtier (Fortuneo, Trade Republic, IBKR)', tradeImportBlock(), !!(view.trades || view.snap))
       + (brokers.length ? fold('brokers', 'Détail par courtier', brokers.map(a => {
         const ls = lines.filter(l => l.accountId === a.id);
-        return `<h2 style="margin-top:10px">${esc(a.name)}</h2>` + row('Encaisse', B.balance(S, a))
+        return `<h2 style="margin-top:10px">${esc(a.name)} · ${eur(B.accountTotal(S, a, t).total)}</h2>` + row('Encaisse', B.balance(S, a))
           + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
       }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
       + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
@@ -472,7 +474,7 @@ const views = {
     const item = (id, icon, title, sub, right = '<span class="muted" style="font-size:22px">›</span>') => `<div class="op tap" data-act="panel" data-id="${esc(id)}"><div class="av">${icon}</div>`
       + `<div class="l">${title}${sub ? `<div class="muted">${sub}</div>` : ''}</div><div class="r">${right}</div></div>`;
     const label = { courant: 'Compte courant', epargne: 'Épargne', cto: 'Compte-titres', pea: 'PEA' }, icon = { courant: '🏦', epargne: '🐷', cto: '📈', pea: '📈' };
-    return card('Mes comptes', S.accounts.map(a => item(`account:${a.id}`, icon[accKind(a)], esc(a.name), `${esc(a.institution)} · ${label[accKind(a)]}`, money(B.balance(S, a)))).join('')
+    return card('Mes comptes', S.accounts.map(a => item(`account:${a.id}`, icon[accKind(a)], esc(a.name), `${esc(a.institution)} · ${label[accKind(a)]}`, acctAmount(a))).join('')
         + item('account:', '＋', '<b style="color:var(--accent)">Ajouter un compte</b>', ''))
       + card('Budget', item('budget:', '🎯', 'Épargne, plafond et alertes', `${eur(st.reserve)} mis de côté par mois · alerte sous ${eur(st.lowSpendable)}`)
         + item('rec:', '🔁', 'Échéances récurrentes', S.recurring.length ? S.recurring.map(r => esc(r.label)).join(', ') : 'loyer, abonnements, salaire…')

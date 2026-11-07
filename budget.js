@@ -438,6 +438,11 @@ const businessDaysAfter = (from, to) => {
 // the previous trading day's close is still current
 export const isStale = (asOf, today) => !asOf || businessDaysAfter(asOf, today) > 1;
 
+// What the broker shows: cash plus the securities at the latest price (a line without a usable price is left out).
+export function accountTotal(s, a, today) {
+  const cash = balance(s, a), securities = valuation(s, today).filter(l => l.accountId === a.id && l.value != null).reduce((n, l) => n + l.value, 0);
+  return { cash, securities, total: cash + securities };
+}
 export function valuation(s, today) {
   return positions(s).map(p => {
     const inst = s.instruments.find(i => i.isin === p.isin) ?? { isin: p.isin, name: p.isin, currency: 'EUR' };

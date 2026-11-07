@@ -733,3 +733,12 @@ test('Automatic journal: each buy or sell advice is logged once with its price, 
   d.journal.at(-1).verdict = 'Conserver'; // a different earlier advice: the current one is logged again
   B.logVerdicts(d, T); assert.equal(d.journal.length, act.length + 1);
 });
+
+test('Account total: cash plus its own securities at the latest price, other accounts not mixed in', () => {
+  const s = withInstruments(), b = s.accounts.find(a => a.id === 'b');
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 90000); B.setQuote(s, ETF, 100, T);
+  const t = B.accountTotal(s, b, T);
+  assert.equal(t.securities, 100000); assert.equal(t.total, B.balance(s, b) + 100000);
+  const other = s.accounts.find(a => a.id !== 'b');
+  assert.equal(B.accountTotal(s, other, T).securities, 0);
+});
