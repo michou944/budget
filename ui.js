@@ -82,6 +82,15 @@ const onboarding = () => card('Bienvenue 👋', empty('Aucun compte pour l’ins
 // Bottom panel to add or change an entry: big amount, categories and accounts as icons to tap, no drop-down list.
 // an account that is neither current nor savings and has no type yet is a brokerage account (created before types existed)
 const accKind = a => (a.type === 'PEA' ? 'pea' : a.type === 'CTO' ? 'cto' : a.savings ? 'epargne' : a.liquid ? 'courant' : 'cto');
+const ACC_TYPES = { courant: ['🏦', 'Compte courant'], livretA: ['🐷', 'Livret A'], ldds: ['🐷', 'LDDS'], lep: ['🐷', 'LEP'], cel: ['🐷', 'CEL'], pel: ['🐷', 'PEL'],
+  av: ['🛡️', 'Assurance-vie'], epargne: ['🐷', 'Autre épargne'], pea: ['📈', 'PEA'], cto: ['📈', 'Compte-titres (CTO)'] };
+// accounts made before the types: guessed from their name until edited
+const guessSub = n => [[/livret ?a\b/i, 'livretA'], [/ldds|ldd\b/i, 'ldds'], [/\blep\b/i, 'lep'], [/\bcel\b/i, 'cel'], [/\bpel\b/i, 'pel'], [/assurance|\bav\b/i, 'av']].find(([r]) => r.test(n))?.[1];
+const accType = a => (a.savings ? (ACC_TYPES[a.sub] ? a.sub : guessSub(a.name) ?? 'epargne') : accKind(a));
+// « Fortuneo · PEA »: the name, plus the envelope when the name does not say it
+const accTag = id => { const a = S.accounts.find(x => x.id === id); if (!a) return '?'; const k = accKind(a), t = k === 'pea' ? 'PEA' : k === 'cto' ? 'CTO' : '';
+  return t && !a.name.toUpperCase().includes(t) ? `${a.name} · ${t}` : a.name; };
+const byBank = list => [...list].sort((x, y) => x.institution.localeCompare(y.institution, 'fr') || x.name.localeCompare(y.name, 'fr'));
 // one journal entry: decision, price then → now, and whether it went the way the decision bet on
 const decisionRow = (d, withName) => `<div class="op"><div class="l"><b>${esc(d.verdict ?? B.DECISIONS[d.action])}</b>${withName ? ` · ${esc(S.instruments.find(i => i.isin === d.isin)?.name ?? d.isin)}` : ''}`
   + `<div class="muted">${shortDate(d.date)}${d.price ? ` · cours ${num(d.price)}` : ''}${d.note ? ` · « ${esc(d.note)} »` : ''}</div></div>`
@@ -101,12 +110,15 @@ function sheet() {
   const body = {
     op: opSheet,
     account: () => {
-      const t = !a ? 'courant' : accKind(a);
+      const t = !a ? 'courant' : accType(a);
       const pctVal = v => (v != null ? String(v).replace('.', ',') : '');
       return `<h2>${a ? esc(a.name) : 'Nouveau compte'}</h2><form data-form="account"><input type="hidden" name="id" value="${a?.id ?? ''}">
-        <div class="chips">${chip('acctype', 'courant', '🏦 Courant', t === 'courant')}${chip('acctype', 'epargne', '🐷 Épargne', t === 'epargne')}${chip('acctype', 'cto', '📈 Compte-titres', t === 'cto')}${chip('acctype', 'pea', '📈 PEA', t === 'pea')}</div>
-        <label>Nom<input name="name" value="${esc(a?.name)}" placeholder="ex. Compte joint" required></label>
-        <label>Banque ou courtier<input name="institution" value="${esc(a?.institution)}" placeholder="ex. BCP, Fortuneo, Trade Republic" required></label>
+        <label>Banque ou courtier<input name="institution" value="${esc(a?.institution)}" placeholder="ex. BCP, Fortuneo, Trade Republic" list="banks" required></label>
+        <datalist id="banks">${[...new Set(S.accounts.map(x => x.institution))].map(b => `<option value="${esc(b)}">`).join('')}</datalist>
+        <div class="muted">Type de compte</div>
+        <div class="chips">${Object.entries(ACC_TYPES).map(([k, [i, l]]) => chip('acctype', k, `${i} ${l}`, t === k)).join('')}</div>
+        ${empty('Un PEA ou un CTO comprend ses titres et son compte espèces : les achats de titres et les espèces de la cagnotte vont sur ce même compte.')}
+        <label>Nom <span class="muted">(facultatif)</span><input name="name" value="${esc(a?.name)}" placeholder="par défaut : banque + type, ex. Fortuneo PEA"></label>
         <label>Solde de départ (€)<input name="opening" inputmode="decimal" value="${a ? euros(a.opening) : ''}" placeholder="0"></label>
         <details${a?.type ? ' open' : ''}><summary class="muted">Bourse : frais du courtier</summary><div style="display:grid;gap:10px;margin-top:10px">
         <div class="grid2"><label>Par ordre (€)<input name="feeFixed" inputmode="decimal" value="${a?.feeFixed != null ? pctVal(a.feeFixed / 100) : ''}"></label><label>En % du montant<input name="feePct" inputmode="decimal" value="${pctVal(a?.feePct)}"></label></div>
@@ -239,7 +251,7 @@ const views = {
     const thisMonth = m === B.monthOf(today()), pct = st.income ? Math.min(100, Math.round((st.spent * 100) / st.income)) : 0;
     const paid = S.ops.filter(o => !o.planned && B.monthOf(o.date) === m && o.kind === 'expense').sort((a, b) => b.date.localeCompare(a.date));
     const aside = [st.reserve && `épargne prévue ${eur(st.reserve)}`, st.stock && `bourse ${eur(st.stock)}`].filter(Boolean);
-    const account = a => `<div class="op"><div class="av">${a.savings ? '🐷' : a.liquid ? '🏦' : '📈'}</div><div class="l">${esc(a.name)}<div class="muted">${esc(a.institution)}</div></div><div class="r">${acctAmount(a)}</div></div>`;
+    const account = a => `<div class="op"><div class="av">${ACC_TYPES[accType(a)][0]}</div><div class="l">${esc(a.name)}<div class="muted">${esc(a.institution)} · ${ACC_TYPES[accType(a)][1]}</div></div><div class="r">${acctAmount(a)}</div></div>`;
     return monthBar(false)
       + `<section class="hero"><div class="lbl">Reste à dépenser ${thisMonth ? 'ce mois-ci' : `en ${monthName(m)}`}</div><div class="big">${eur(st.spendable)}</div>`
       + (st.shortfall ? `<div style="font-weight:700">⚠️ Il manque ${eur(st.shortfall)} pour couvrir ce qui est prévu</div>` : '')
@@ -255,7 +267,7 @@ const views = {
         || empty('Rien à venir. Ajoutez loyer, abonnements… dans Réglages › Échéances récurrentes.'))
       + (paid.length ? card(`Déjà payé · ${eur(paid.reduce((t, o) => t - o.amount, 0))}`, paid.slice(0, 6).map(opItem).join('')
         + (paid.length > 6 ? `<div style="margin-top:8px">${btn('goOps', '', `Voir les ${paid.length} paiements →`, 'small ghost')}</div>` : '')) : '')
-      + card('Mes comptes', S.accounts.map(account).join('') || empty('Aucun compte : créez-en dans Réglages.'))
+      + card('Mes comptes', byBank(S.accounts).map(account).join('') || empty('Aucun compte : créez-en dans Réglages.'))
       + (stale.length ? `<div class="banner warn"><span>🕒 ${stale.length} compte(s) sans mouvement depuis 30 jours : ${stale.map(x => esc(x.a.name)).join(', ')}</span></div>` : '')
       + fab();
   },
@@ -302,7 +314,7 @@ const views = {
       const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
       const gain = ls.reduce((a, l) => a + (l.gain ?? 0), 0);
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
-        + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accName(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
+        + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accTag(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
         + (x.buy ? `<div class="good">Enveloppe : ${num(x.buy.qty)} part(s) ≈ ${eur(x.buy.total)} sur ${esc(accName(x.buy.accountId))}</div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
@@ -405,7 +417,7 @@ const views = {
         + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
         + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
       + fold('purchase', '➕ J’ai acheté une action', `<form data-form="purchase"><div class="muted">Chez</div>`
-        + `<div class="chips">${(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(a.name), !n)).join('')}</div>`
+        + `<div class="chips">${byBank(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(accTag(a.id)), !n)).join('')}</div>`
         + `<label>ISIN<input name="isin" list="isins" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
         + `<datalist id="isins">${S.instruments.map(i => `<option value="${esc(i.isin)}">${esc(i.name)}</option>`).join('')}</datalist>`
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
@@ -413,7 +425,7 @@ const views = {
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
         + `${empty('Le montant est retiré des espèces du courtier (cagnotte). Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       + (cash.length ? card(`💰 Ma cagnotte · ${eur(cash.reduce((n, x) => n + B.balance(S, x), 0))}`, `<form data-form="cash"><input type="hidden" name="date" value="${t}">`
-        + cash.map(x => `<label>${esc(x.name)} <span class="muted">· espèces</span><input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(B.balance(S, x))}"></label>`).join('')
+        + byBank(cash).map(x => `<label>${esc(accTag(x.id))} <span class="muted">· espèces</span><input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(B.balance(S, x))}"></label>`).join('')
         + `<button>Mettre à jour mes comptes</button>${empty('Recopiez les espèces affichées par chaque banque (dividendes compris). L’écart est enregistré dans Mouvements, hors budget du foyer.')}</form>`) : '')
       + `<details class="card fold" data-fold="more"${!ready || sr0 || view.trades || view.snap || view.open.has('more') ? ' open' : ''}><summary>⚙️ Autres options</summary>`
       + (view.search?.forIsin ? '' : searchCard())
@@ -490,8 +502,10 @@ const views = {
     const st = S.settings, notifOn = st.notify && canNotify() && Notification.permission === 'granted';
     const item = (id, icon, title, sub, right = '<span class="muted" style="font-size:22px">›</span>') => `<div class="op tap" data-act="panel" data-id="${esc(id)}"><div class="av">${icon}</div>`
       + `<div class="l">${title}${sub ? `<div class="muted">${sub}</div>` : ''}</div><div class="r">${right}</div></div>`;
-    const label = { courant: 'Compte courant', epargne: 'Épargne', cto: 'Compte-titres', pea: 'PEA' }, icon = { courant: '🏦', epargne: '🐷', cto: '📈', pea: '📈' };
-    return card('Mes comptes', S.accounts.map(a => item(`account:${a.id}`, icon[accKind(a)], esc(a.name), `${esc(a.institution)} · ${label[accKind(a)]}`, acctAmount(a))).join('')
+    const t = today(), banks = [...new Set(byBank(S.accounts).map(a => a.institution))];
+    return card('Mes comptes', banks.map(b => { const as = byBank(S.accounts).filter(a => a.institution === b);
+      return `<div class="day">🏛️ ${esc(b)} · ${eur(as.reduce((n, a) => n + B.accountTotal(S, a, t).total, 0))}</div>` + as.map(a => { const k = accType(a), v = B.accountTotal(S, a, t);
+        return item(`account:${a.id}`, ACC_TYPES[k][0], esc(a.name), ['pea', 'cto'].includes(k) ? `${ACC_TYPES[k][1]} · titres ${eur(v.securities)} · espèces ${eur(v.cash)}` : ACC_TYPES[k][1], money(v.total)); }).join(''); }).join('')
         + item('account:', '＋', '<b style="color:var(--accent)">Ajouter un compte</b>', ''))
       + card('Budget', item('budget:', '🎯', 'Épargne, plafond et alertes', `${eur(st.reserve)} mis de côté par mois · alerte sous ${eur(st.lowSpendable)}`)
         + item('rec:', '🔁', 'Échéances récurrentes', S.recurring.length ? S.recurring.map(r => esc(r.label)).join(', ') : 'loyer, abonnements, salaire…')
@@ -727,8 +741,9 @@ const forms = {
   },
   account: f => {
     const pctOrNone = v => { if (!String(v ?? '').trim()) return undefined; const x = Number(String(v).replace(',', '.')); if (!(x >= 0 && x <= 20)) throw new Error('Pourcentage de frais invalide'); return x; };
-    const t = f.acctype ?? 'courant'; // courant | epargne | cto | pea, chosen as a chip
-    const a = { name: f.name.trim(), institution: f.institution.trim(), opening: parseEur(f.opening), liquid: t === 'courant', savings: t === 'epargne', fractional: f.fractional === 'on',
+    const t = ACC_TYPES[f.acctype] ? f.acctype : 'courant', savings = !['courant', 'pea', 'cto'].includes(t);
+    const a = { name: f.name.trim() || `${f.institution.trim()} ${ACC_TYPES[t][1].replace(/ \(CTO\)$/, '')}`, institution: f.institution.trim(), opening: parseEur(f.opening),
+      liquid: t === 'courant', savings, sub: savings && t !== 'epargne' ? t : undefined, fractional: f.fractional === 'on',
       type: t === 'cto' ? 'CTO' : t === 'pea' ? 'PEA' : undefined, feeFixed: String(f.feeFixed ?? '').trim() ? parseEur(f.feeFixed) : undefined, feePct: pctOrNone(f.feePct), fxPct: pctOrNone(f.fxPct) };
     if (a.feeFixed < 0) throw new Error('Frais invalides');
     if (f.id) Object.assign(S.accounts.find(x => x.id === f.id), a); else S.accounts.push({ id: B.uid(), ...a });

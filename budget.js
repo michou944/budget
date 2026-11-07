@@ -34,6 +34,10 @@ export function validateState(x) {
     const withdrawn = ['Amundi MSCI World (CW8)', 'Amundi PEA S&P 500 (PSP5)', 'Amundi Stoxx Europe 600 (MEUD)', 'Amundi PEA MSCI Emerging Markets (PAEEM)'];
     x.instruments = x.instruments.filter(i => !(i.type === 'ETF' && withdrawn.includes(i.name) && !x.ops.some(o => o.isin === i.isin)
       && !Object.values(x.snapshots).some(sn => sn.lines.some(l => l.isin === i.isin))));
+    // v27 own purchases took their amount from the broker's cash, typed by hand in the cagnotte: keep only the cost
+    for (const o of x.ops ?? []) if (o.kind === 'invest' && o.isin && o.qty > 0 && o.amount < 0 && !o.envelopeId && !o.importKey && o.cost == null && /^Achat /.test(o.label ?? '')) {
+      o.cost = -o.amount; o.amount = 0;
+    }
   }
   const ok = x && x.version === 2 && x.settings?.market && x.quotes && x.fx
     && ['accounts', 'ops', 'recurring', 'envelopes', 'categories', 'dismissedAlerts', 'instruments', 'requestLog'].every(k => Array.isArray(x[k]))
@@ -349,7 +353,7 @@ export function addHolding(s, accountId, isin, date, qty, costCents) {
   s.ops.push({ id: uid(), accountId, date, amount: 0, cost: costCents, kind: 'invest', isin, qty, label: 'Position existante', seq: stamp(s) });
 }
 
-// A purchase made at the broker: the title is followed from its ISIN if new, the amount (fees included) leaves the broker's cash.
+// A purchase made at the broker: the title is followed from its ISIN if new. Only its cost is kept: the cash is typed in the cagnotte.
 export function addPurchase(s, { accountId, isin, name, date, qty, cents }) {
   if (!s.accounts.some(a => a.id === accountId)) throw new Error('Choisissez le courtier');
   if (!Number.isInteger(cents) || cents <= 0) throw new Error('Montant invalide');
@@ -357,7 +361,7 @@ export function addPurchase(s, { accountId, isin, name, date, qty, cents }) {
   if (!s.instruments.some(i => i.isin === id)) saveInstrument(s, { isin: id, name, currency: 'EUR' }); // the real currency comes with the first price
   checkTrade(s, id, qty);
   const i = s.instruments.find(x => x.isin === id);
-  s.ops.push({ id: uid(), accountId, date, amount: -cents, kind: 'invest', isin: id, qty, label: `Achat ${i.name}`, seq: stamp(s) });
+  s.ops.push({ id: uid(), accountId, date, amount: 0, cost: cents, kind: 'invest', isin: id, qty, label: `Achat ${i.name}`, seq: stamp(s) });
   return id;
 }
 
