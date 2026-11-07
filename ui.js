@@ -267,7 +267,21 @@ const views = {
         || empty('Rien à venir. Ajoutez loyer, abonnements… dans Réglages › Échéances récurrentes.'))
       + (paid.length ? card(`Déjà payé · ${eur(paid.reduce((t, o) => t - o.amount, 0))}`, paid.slice(0, 6).map(opItem).join('')
         + (paid.length > 6 ? `<div style="margin-top:8px">${btn('goOps', '', `Voir les ${paid.length} paiements →`, 'small ghost')}</div>` : '')) : '')
-      + card('Mes comptes', byBank(S.accounts).map(account).join('') || empty('Aucun compte : créez-en dans Réglages.'))
+      + card('Mes comptes', (() => {
+        const t = today(), vals = B.valuation(S, t), tot = x => B.accountTotal(S, x, t);
+        const open = k => (view.open.has(k) ? ' open' : '');
+        // PEA / CTO: titles valued on one side, the cash account on the other, its amount typed right here
+        const invest = x => { const v = tot(x), k = `acc:${x.id}`;
+          return `<details class="tree" data-fold="${esc(k)}"${open(k)}><summary><span>${ACC_TYPES[accType(x)][0]} ${esc(x.name)}<div class="muted">${ACC_TYPES[accType(x)][1]}</div></span><b>${eur(v.total)}</b></summary>`
+            + `<div class="day">📊 Valorisation des titres · ${eur(v.securities)}</div>`
+            + (vals.filter(l => l.accountId === x.id).map(l => `<div class="row"><span>${esc(l.inst.name)} <span class="muted">· ${num(l.qty)} part(s)${l.value == null ? ' · au prix d’achat' : ''}</span></span>${eur(l.value ?? l.cost)}</div>`).join('') || empty('Aucun titre sur ce compte.'))
+            + `<div class="day">💶 Espèces · ${eur(v.cash)}</div><form data-form="cash" class="grid2"><input type="hidden" name="date" value="${t}">`
+            + `<input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(v.cash)}" aria-label="Espèces de ${esc(x.name)}" placeholder="Montant affiché par la banque"><button class="ghost">Mettre à jour</button></form></details>`; };
+        return [...new Set(byBank(S.accounts).map(x => x.institution))].map(b => { const as = byBank(S.accounts).filter(x => x.institution === b), k = `bank:${b}`;
+          return `<details class="tree" data-fold="${esc(k)}"${open(k)}><summary><span>🏛️ ${esc(b)}</span><b>${eur(as.reduce((n, x) => n + tot(x).total, 0))}</b></summary>`
+            + as.map(x => (['pea', 'cto'].includes(accKind(x)) ? invest(x) : account(x))).join('') + '</details>';
+        }).join('') || empty('Aucun compte : créez-en dans Réglages.');
+      })())
       + (stale.length ? `<div class="banner warn"><span>🕒 ${stale.length} compte(s) sans mouvement depuis 30 jours : ${stale.map(x => esc(x.a.name)).join(', ')}</span></div>` : '')
       + fab();
   },
