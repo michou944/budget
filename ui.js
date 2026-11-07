@@ -352,7 +352,7 @@ const views = {
           B.journalReview(S).filter(d => d.isin === isin)))
         + `<div class="muted" style="margin:6px 0">${B.DISCLAIMER}</div>`
         + `<div class="row"><span>Cours</span><span>${quoteInfo(q, i)}${staleTag(q && B.isStale(q.asOf, t))}</span></div>`
-        + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
+        + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accTag(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
         + ((r => (r ? `<div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(r)}</div>` : ''))(B.realizedGain(S, isin)))
         + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
           + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
@@ -360,7 +360,10 @@ const views = {
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
           + `<div class="muted">${esc(n.source)} · ${n.publishedAt}</div></div></div>`).join('') || empty('Aucune actualité.'))
-        + '<details style="margin-top:12px"><summary><b>⚙️ Gérer ce titre</b> <span class="muted">vente, division, cotation</span></summary>'
+        + '<details style="margin-top:12px"><summary><b>⚙️ Gérer ce titre</b> <span class="muted">compte, vente, division</span></summary>'
+        + lines.filter(l => l.isin === isin).map(l => ((to => (to.length ? `<form data-form="move" style="margin-top:8px"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="from" value="${esc(l.accountId)}">`
+          + `<b>Sur ${esc(accTag(l.accountId))}</b> <span class="muted">· ${num(l.qty)} part(s) · le déplacer vers :</span><div class="chips">${to.map((a, n) => chip('to', a.id, esc(accTag(a.id)), !n)).join('')}</div>`
+          + `<button class="ghost">Déplacer vers ce compte</button></form>` : ''))(byBank(cash.length ? cash : S.accounts).filter(a => a.id !== l.accountId)))).join('')
         + lines.filter(l => l.isin === isin).map(l => `<details style="margin-top:8px"><summary><b>J’ai vendu</b> <span class="muted">sur ${esc(accName(l.accountId))}</span></summary>
           <form data-form="sale"><input type="hidden" name="pos" value="${esc(`${l.accountId}|${isin}`)}">
           <div class="grid2"><label>Quantité vendue<input name="qty" inputmode="decimal" value="${num(l.qty)}"></label><label>Montant net reçu (€)<input name="amount" inputmode="decimal" required></label></div>
@@ -730,6 +733,7 @@ const forms = {
       + `Avez-vous bien saisi le prix de revient TOTAL (et non par part) ? OK pour enregistrer tel quel, Annuler pour corriger.`)) throw new Error('Saisie annulée : corrigez le prix de revient total.');
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
+  move: f => B.moveHolding(S, f.isin, f.from, f.to),
   purchase: f => { view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount) }); },
   cash: f => { for (const [k, v] of Object.entries(f)) if (k.startsWith('c_') && String(v).trim()) B.setCash(S, k.slice(2), f.date, parseEur(v)); },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),

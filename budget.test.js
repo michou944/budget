@@ -775,3 +775,19 @@ test('Own purchases saved by v27 give their amount back to the cash, cost kept',
   assert.equal(B.positions(n).find(p => p.isin === 'NL0010273215').cost, 40000);
   assert.ok(n.ops.filter(o => o.envelopeId).every(o => o.amount < 0)); // envelope buys untouched
 });
+
+test('Account total: a title without price yet counts at its cost', () => {
+  const s = withInstruments(), b = s.accounts.find(a => a.id === 'b');
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 90000);
+  assert.equal(B.accountTotal(s, b, T).securities, 90000);
+});
+
+test('Move a position to another account: bought and imported lines follow, cost and quantity kept', () => {
+  const s = withInstruments(), [a, b] = ['a', 'b'].map(id => s.accounts.find(x => x.id === id));
+  s.snapshots.b = { date: '2026-01-01', seq: 0, lines: [{ isin: ETF, qty: 5, cost: 40000 }] };
+  B.addPurchase(s, { accountId: 'b', isin: ETF, date: '2026-02-01', qty: 1, cents: 9000 });
+  B.moveHolding(s, ETF, 'b', 'a');
+  assert.deepEqual(B.positions(s).filter(p => p.isin === ETF), [{ accountId: 'a', isin: ETF, qty: 6, cost: 49000 }]);
+  assert.equal(B.accountTotal(s, b, T).securities, 0); assert.equal(B.accountTotal(s, a, T).securities, 49000);
+  assert.throws(() => B.moveHolding(s, ETF, 'a', 'a'));
+});

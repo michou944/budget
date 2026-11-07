@@ -365,6 +365,17 @@ export function addPurchase(s, { accountId, isin, name, date, qty, cents }) {
   return id;
 }
 
+// A position recorded on the wrong account (e.g. the CTO instead of the PEA) moves with its whole history.
+export function moveHolding(s, isin, fromId, toId) {
+  if (fromId === toId || !s.accounts.some(a => a.id === toId)) throw new Error('Choisissez un autre compte');
+  const sn = s.snapshots?.[fromId], line = sn?.lines.find(l => l.isin === isin);
+  if (line) { // the imported line becomes a holding on the new account, counted whatever that account's own import date
+    sn.lines = sn.lines.filter(l => l !== line);
+    s.ops.push({ id: uid(), accountId: toId, date: sn.date, amount: 0, cost: line.cost, kind: 'invest', isin, qty: line.qty, label: 'Position transférée', seq: stamp(s) });
+  }
+  for (const o of s.ops.filter(o => o.accountId === fromId && o.isin === isin)) Object.assign(o, { accountId: toId, seq: stamp(s) });
+}
+
 // Records a sale already done at the broker; proceeds land in the broker account, not in the household budget.
 export function addSale(s, accountId, isin, date, qty, cents) {
   checkTrade(s, isin, qty);
@@ -465,7 +476,8 @@ export const isStale = (asOf, today) => !asOf || businessDaysAfter(asOf, today) 
 
 // What the broker shows: cash plus the securities at the latest price (a line without a usable price is left out).
 export function accountTotal(s, a, today) {
-  const cash = balance(s, a), securities = valuation(s, today).filter(l => l.accountId === a.id && l.value != null).reduce((n, l) => n + l.value, 0);
+  // a title without a usable price yet counts at what it cost, so a purchase shows on its account at once
+  const cash = balance(s, a), securities = valuation(s, today).filter(l => l.accountId === a.id).reduce((n, l) => n + (l.value ?? l.cost), 0);
   return { cash, securities, total: cash + securities };
 }
 export function valuation(s, today) {
