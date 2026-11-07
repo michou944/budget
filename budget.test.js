@@ -752,3 +752,16 @@ test('Cagnotte: the cash typed from the bank becomes the account balance, outsid
   assert.deepEqual([B.monthStats(s, T.slice(0, 7)).income, B.monthStats(s, T.slice(0, 7)).spent], [m.income, m.spent]);
   assert.throws(() => B.setCash(s, 'nope', T, 0));
 });
+
+test('Own purchase: new ISIN followed, position on the chosen broker, cash taken from it, outside the household budget', () => {
+  const s = B.demoState(T), a = s.accounts.at(-1), cash = B.balance(s, a), m = B.monthStats(s, T.slice(0, 7));
+  const id = B.addPurchase(s, { accountId: a.id, isin: ' nl0010273215 ', name: 'ASML', date: T, qty: 2, cents: 40000 });
+  assert.equal(id, 'NL0010273215'); assert.equal(s.instruments.find(i => i.isin === id).name, 'ASML');
+  assert.deepEqual(B.positions(s).find(p => p.isin === id), { accountId: a.id, isin: id, qty: 2, cost: 40000 });
+  assert.equal(B.balance(s, a), cash - 40000);
+  B.addPurchase(s, { accountId: a.id, isin: id, date: T, qty: 1, cents: 21000 }); // known title: no name needed
+  assert.equal(B.positions(s).find(p => p.isin === id).qty, 3);
+  assert.equal(B.monthStats(s, T.slice(0, 7)).spent, m.spent);
+  assert.throws(() => B.addPurchase(s, { accountId: a.id, isin: 'XX123', date: T, qty: 1, cents: 100 }), /ISIN/);
+  assert.throws(() => B.addPurchase(s, { accountId: a.id, isin: id, date: T, qty: 0, cents: 100 }));
+});

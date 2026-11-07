@@ -349,6 +349,18 @@ export function addHolding(s, accountId, isin, date, qty, costCents) {
   s.ops.push({ id: uid(), accountId, date, amount: 0, cost: costCents, kind: 'invest', isin, qty, label: 'Position existante', seq: stamp(s) });
 }
 
+// A purchase made at the broker: the title is followed from its ISIN if new, the amount (fees included) leaves the broker's cash.
+export function addPurchase(s, { accountId, isin, name, date, qty, cents }) {
+  if (!s.accounts.some(a => a.id === accountId)) throw new Error('Choisissez le courtier');
+  if (!Number.isInteger(cents) || cents <= 0) throw new Error('Montant invalide');
+  const id = String(isin ?? '').trim().toUpperCase();
+  if (!s.instruments.some(i => i.isin === id)) saveInstrument(s, { isin: id, name, currency: 'EUR' }); // the real currency comes with the first price
+  checkTrade(s, id, qty);
+  const i = s.instruments.find(x => x.isin === id);
+  s.ops.push({ id: uid(), accountId, date, amount: -cents, kind: 'invest', isin: id, qty, label: `Achat ${i.name}`, seq: stamp(s) });
+  return id;
+}
+
 // Records a sale already done at the broker; proceeds land in the broker account, not in the household budget.
 export function addSale(s, accountId, isin, date, qty, cents) {
   checkTrade(s, isin, qty);

@@ -302,6 +302,7 @@ const views = {
       const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
       const gain = ls.reduce((a, l) => a + (l.gain ?? 0), 0);
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
+        + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accName(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
         + (x.buy ? `<div class="good">Enveloppe : ${num(x.buy.qty)} part(s) ≈ ${eur(x.buy.total)} sur ${esc(accName(x.buy.accountId))}</div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
@@ -342,7 +343,7 @@ const views = {
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accName(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
         + ((r => (r ? `<div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(r)}</div>` : ''))(B.realizedGain(S, isin)))
         + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
-          + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
+          + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
           S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
@@ -403,6 +404,14 @@ const views = {
           || empty(ready && newsOn(mk) ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (« Réglages bourse » plus bas).'))
         + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
         + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
+      + fold('purchase', '➕ J’ai acheté une action', `<form data-form="purchase"><div class="muted">Chez</div>`
+        + `<div class="chips">${(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(a.name), !n)).join('')}</div>`
+        + `<label>ISIN<input name="isin" list="isins" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
+        + `<datalist id="isins">${S.instruments.map(i => `<option value="${esc(i.isin)}">${esc(i.name)}</option>`).join('')}</datalist>`
+        + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
+        + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" required></label></div>`
+        + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
+        + `${empty('Le montant est retiré des espèces du courtier (cagnotte). Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       + (cash.length ? card(`💰 Ma cagnotte · ${eur(cash.reduce((n, x) => n + B.balance(S, x), 0))}`, `<form data-form="cash"><input type="hidden" name="date" value="${t}">`
         + cash.map(x => `<label>${esc(x.name)} <span class="muted">· espèces</span><input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(B.balance(S, x))}"></label>`).join('')
         + `<button>Mettre à jour mes comptes</button>${empty('Recopiez les espèces affichées par chaque banque (dividendes compris). L’écart est enregistré dans Mouvements, hors budget du foyer.')}</form>`) : '')
@@ -707,6 +716,7 @@ const forms = {
       + `Avez-vous bien saisi le prix de revient TOTAL (et non par part) ? OK pour enregistrer tel quel, Annuler pour corriger.`)) throw new Error('Saisie annulée : corrigez le prix de revient total.');
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
+  purchase: f => { view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount) }); },
   cash: f => { for (const [k, v] of Object.entries(f)) if (k.startsWith('c_') && String(v).trim()) B.setCash(S, k.slice(2), f.date, parseEur(v)); },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
