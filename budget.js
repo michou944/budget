@@ -403,12 +403,13 @@ const stamp = s => (s.seq = (s.seq ?? 0) + 1);
 // Average-cost positions per account and instrument; cost in cents, fees included.
 // An account with a broker snapshot starts from it: only its trades dated after the snapshot are added.
 // A split multiplies the quantity and leaves the total cost unchanged; a sale books its realized gain against average cost.
-function book(s) {
-  const snaps = s.snapshots ?? {}, map = new Map();
+// `until`: the book as it stood that day (an import only counts from its own date)
+function book(s, until) {
+  const snaps = Object.fromEntries(Object.entries(s.snapshots ?? {}).filter(([, sn]) => !until || sn.date <= until)), map = new Map();
   for (const [accountId, sn] of Object.entries(snaps)) for (const l of sn.lines) map.set(`${accountId}|${l.isin}`, { accountId, isin: l.isin, qty: l.qty, cost: l.cost, realized: 0 });
   const counted = o => {
     const sn = snaps[o.accountId];
-    return o.kind === 'invest' && o.isin && (o.qty || o.split) && (!sn || o.date > sn.date || (o.seq ?? 0) > (sn.seq ?? 0)); // recorded after the import: not in it
+    return o.kind === 'invest' && o.isin && (o.qty || o.split) && (!until || o.date <= until) && (!sn || o.date > sn.date || (o.seq ?? 0) > (sn.seq ?? 0)); // recorded after the import: not in it
   };
   for (const o of s.ops.filter(counted).sort((a, b) => a.date.localeCompare(b.date))) {
     const k = `${o.accountId}|${o.isin}`, p = map.get(k) ?? { accountId: o.accountId, isin: o.isin, qty: 0, cost: 0, realized: 0 };
@@ -423,6 +424,20 @@ function book(s) {
   return [...map.values()];
 }
 export const positions = s => book(s).filter(p => p.qty > 0).map(({ accountId, isin, qty, cost }) => ({ accountId, isin, qty, cost }));
+// Wealth at the end of each month: cash from the movements, titles at that day's close (at cost without a close).
+// shortcut: foreign titles use today's exchange rate, and titles imported from a statement only appear from its date.
+export function wealthSeries(s, months, today) {
+  return months.map(m => {
+    const end = new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7), 0)).toISOString().slice(0, 10), d = end < today ? end : today;
+    const cash = sum(s.accounts, a => a.opening) + sum(s.ops.filter(o => !o.planned && o.date <= d), o => o.amount);
+    const securities = d === today ? sum(valuation(s, today), l => l.value ?? l.cost) : sum(book(s, d).filter(p => p.qty > 0), p => { // today: same figure as the accounts
+      const i = s.instruments.find(x => x.isin === p.isin), close = (s.history[p.isin] ?? []).filter(([t]) => t <= d).at(-1)?.[1];
+      const rate = i?.currency === 'EUR' ? 1 : s.fx[i?.currency]?.rate;
+      return close && rate ? Math.round((p.qty * close * 100) / rate) : p.cost;
+    });
+    return { month: m, cash, securities, total: cash + securities };
+  });
+}
 export const realizedGain = (s, isin) => book(s).filter(p => p.isin === isin).reduce((a, p) => a + p.realized, 0);
 
 // Decision journal: what I decided, why, at what price and what the tool said; reviewed later against the current price.

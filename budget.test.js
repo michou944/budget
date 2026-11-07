@@ -791,3 +791,14 @@ test('Move a position to another account: bought and imported lines follow, cost
   assert.equal(B.accountTotal(s, b, T).securities, 0); assert.equal(B.accountTotal(s, a, T).securities, 49000);
   assert.throws(() => B.moveHolding(s, ETF, 'a', 'a'));
 });
+
+test('Wealth over time: cash and titles at each month end, titles at the close of that day', () => {
+  const s = withInstruments(), open = s.accounts.reduce((n, a) => n + a.opening, 0), cash0 = B.wealthSeries(s, ['2026-03'], T)[0].cash;
+  B.addHolding(s, 'b', ETF, '2026-05-10', 10, 90000);
+  s.history[ETF] = [['2026-05-29', 95], ['2026-06-30', 110], ['2026-10-30', 120]];
+  const [apr, may, jun] = B.wealthSeries(s, ['2026-04', '2026-05', '2026-06'], T);
+  assert.equal(apr.securities, 0); assert.equal(may.securities, 95000); assert.equal(jun.securities, 110000);
+  assert.equal(jun.total, jun.cash + 110000); assert.ok(open !== undefined && cash0 === apr.cash);
+  B.setQuote(s, ETF, 125, T); assert.equal(B.wealthSeries(s, ['2026-11'], T)[0].securities, 125000); // today: latest price, as on the accounts
+  delete s.history[ETF]; assert.equal(B.wealthSeries(s, ['2026-06'], T)[0].securities, 90000); // no close: at cost
+});

@@ -515,6 +515,62 @@ const views = {
       + '</details>';
   },
 
+  stats() {
+    const t = today(), m = B.monthOf(t), first = S.ops.reduce((x, o) => (o.date < x ? o.date : x), t).slice(0, 7);
+    const months = B.monthsBack(m, 12).filter(x => x >= first), w = B.wealthSeries(S, months, t), now = w.at(-1), start = w[0];
+    const ms = months.map(x => ({ month: x, ...B.monthStats(S, x) })), past = ms.slice(0, -1).filter(x => x.income || x.spent); // finished months only
+    const avg = k => (past.length ? Math.round(past.reduce((n, x) => n + x[k], 0) / past.length) : 0), avgIn = avg('income'), avgOut = avg('spent');
+    const rate = avgIn ? Math.round(((avgIn - avgOut) * 100) / avgIn) : null, pct = (v, of) => (of ? `${((v * 100) / of).toFixed(1).replace('.', ',')} %` : '');
+    const tot = a => B.accountTotal(S, a, t), safe = S.accounts.filter(a => a.savings && accType(a) !== 'av').reduce((n, a) => n + tot(a).cash, 0);
+    const mon = x => 'JFMAMJJASOND'[+x.slice(5) - 1];
+    const line = () => { // total wealth (area) and its titles part (dashed line)
+      if (w.length < 2) return empty('La courbe apparaît après un mois de mouvements.');
+      const W = 320, H = 150, vs = w.flatMap(p => [p.total, p.securities]), lo = Math.min(0, ...vs), hi = Math.max(...vs, 1);
+      const x = k => 6 + (k * (W - 12)) / (w.length - 1), y = v => 12 + (1 - (v - lo) / (hi - lo || 1)) * (H - 34), pts = f => w.map((p, k) => `${x(k).toFixed(1)},${y(f(p)).toFixed(1)}`).join(' ');
+      return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Évolution du patrimoine" style="width:100%;height:auto">`
+        + `<polygon fill="var(--accent)" opacity=".15" points="${x(0)},${y(lo)} ${pts(p => p.total)} ${x(w.length - 1)},${y(lo)}"/>`
+        + `<polyline fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linejoin="round" points="${pts(p => p.total)}"/>`
+        + `<polyline fill="none" stroke="#4f46e5" stroke-width="2" stroke-dasharray="5 4" points="${pts(p => p.securities)}"/>`
+        + w.map((p, k) => `<circle cx="${x(k)}" cy="${y(p.total)}" r="6" fill="transparent"><title>${monthName(p.month)} : ${eur(p.total)} (titres ${eur(p.securities)})</title></circle>`
+          + `<text x="${x(k)}" y="${H - 4}" font-size="9" text-anchor="middle" fill="var(--muted)">${mon(p.month)}</text>`).join('')
+        + `<text x="2" y="9" font-size="9" fill="var(--muted)">${eur(hi)}</text></svg>`
+        + `<div class="muted"><b style="color:var(--accent)">━</b> patrimoine total &nbsp; <b style="color:#4f46e5">┅</b> dont titres</div>`;
+    };
+    const inOut = () => { // income and spending side by side for each month
+      const top = Math.max(1, ...ms.flatMap(x => [x.income, x.spent])), bw = 300 / ms.length;
+      return `<svg viewBox="0 0 300 118" role="img" aria-label="Revenus et dépenses par mois" style="width:100%;height:auto">`
+        + ms.map((x, k) => [[x.income, 'var(--good)', 0], [x.spent, 'var(--bad)', 1]].map(([v, c, j]) => { const h = (Math.max(0, v) / top) * 92;
+          return `<rect x="${k * bw + 3 + j * (bw / 2 - 2)}" y="${100 - h}" width="${Math.max(1, bw / 2 - 4)}" height="${h}" rx="3" fill="${c}" opacity="${x.month === m ? 0.5 : 0.9}"><title>${monthName(x.month)} : ${j ? 'dépenses' : 'revenus'} ${eur(v)}</title></rect>`; }).join('')
+          + `<text x="${k * bw + bw / 2}" y="114" font-size="9" text-anchor="middle" fill="var(--muted)">${mon(x.month)}</text>`).join('') + '</svg>'
+        + `<div class="muted"><b class="good">■</b> revenus &nbsp; <b class="bad">■</b> dépenses · mois en cours en clair</div>`;
+    };
+    const bars = rows => { const all = rows.reduce((n, r) => n + Math.max(0, r[1]), 0) || 1;
+      return rows.filter(r => r[1]).sort((a, b) => b[1] - a[1]).map(([l, v], k) => `<div style="margin:8px 0"><div class="row" style="border:0;padding:0"><span>${l}</span><span>${eur(v)} <span class="muted">${pct(Math.max(0, v), all)}</span></span></div>`
+        + `<div class="bar"><i style="width:${Math.max(0, (v * 100) / all)}%;background:${PALETTE[k % PALETTE.length]}"></i></div></div>`).join('') || empty('Aucun compte.'); };
+    const group = key => Object.entries(S.accounts.reduce((g, a) => { const k = key(a); g[k] = (g[k] ?? 0) + tot(a).total; return g; }, {}));
+    const vals = B.valuation(S, t), cost = vals.reduce((n, l) => n + l.cost, 0), worth = vals.reduce((n, l) => n + (l.value ?? l.cost), 0);
+    const latent = vals.reduce((n, l) => n + (l.gain ?? 0), 0), realized = [...new Set(S.ops.filter(o => o.isin).map(o => o.isin))].reduce((n, i) => n + B.realizedGain(S, i), 0);
+    const divs = months.length ? S.ops.filter(o => !o.planned && o.amount > 0 && /^Dividende /.test(o.label ?? '') && o.date >= `${months[0]}-01`).reduce((n, o) => n + o.amount, 0) : 0;
+    const chg = now && start ? now.total - start.total : 0;
+    return `<section class="hero"><div class="lbl">Patrimoine total</div><div class="big">${eur(now?.total ?? 0)}</div>`
+        + (w.length > 1 ? `<div style="font-weight:700;font-size:16px">${chg >= 0 ? '▲ +' : '▼ −'}${eur(Math.abs(chg))}${start.total > 0 ? ` (${chg >= 0 ? '+' : '−'}${pct(Math.abs(chg), start.total)})` : ''} depuis ${monthName(start.month)}</div>` : '')
+        + `<div class="stats"><div><small>Espèces</small>${eur(now?.cash ?? 0)}</div><div><small>Titres</small>${eur(now?.securities ?? 0)}</div><div><small>Épargne / mois</small>${eur(avgIn - avgOut)}</div></div></section>`
+      + card('📈 Évolution du patrimoine', line() + empty('Fin de chaque mois : espèces de tous les comptes + titres au cours de clôture de ce jour-là (au prix d’achat s’il manque).'))
+      + card('💸 Revenus et dépenses', inOut()
+        + row('Revenus moyens par mois', avgIn) + row('Dépenses moyennes par mois', avgOut)
+        + `<div class="row"><span>Taux d’épargne</span><b class="${rate == null ? '' : rate >= 10 ? 'good' : rate >= 0 ? 'warn' : 'bad'}">${rate == null ? '—' : `${rate} %`}</b></div>`
+        + `<div class="row"><span>Épargne de précaution</span><b>${avgOut ? `${(safe / avgOut).toFixed(1).replace('.', ',')} mois de dépenses` : '—'}</b></div>`
+        + empty(`Moyennes sur ${past.length} mois terminé(s). Taux d’épargne : la part des revenus qui n’est pas dépensée (10 % et plus, c’est bien). Épargne de précaution : vos livrets (${eur(safe)}) divisés par vos dépenses moyennes ; on conseille souvent 3 à 6 mois.`))
+      + card('🧩 Répartition par type de compte', bars(group(a => `${ACC_TYPES[accType(a)][0]} ${ACC_TYPES[accType(a)][1]}`)))
+      + card('🏛️ Répartition par banque', bars(group(a => esc(a.institution))))
+      + (vals.length ? card('📊 Bourse', row('Argent investi (prix de revient)', cost) + row('Valeur actuelle des titres', worth)
+        + `<div class="row"><span>Plus-value latente</span>${money(latent)}</div><div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(realized)}</div>`
+        + (divs ? `<div class="row"><span>Dividendes reçus (12 mois)</span>${money(divs)}</div>` : '')
+        + bars(vals.map(l => [`${esc(l.inst.name)} <span class="muted">· ${esc(accTag(l.accountId))}</span>`, l.value ?? l.cost]))
+        + empty('Latente : gain ou perte si vous vendiez aujourd’hui, sur les titres qui ont un cours. Les barres : poids de chaque ligne dans le portefeuille.')) : '')
+      + `<div class="muted" style="margin:6px 4px 90px">${B.DISCLAIMER}</div>`;
+  },
+
   settings() {
     const st = S.settings, notifOn = st.notify && canNotify() && Notification.permission === 'granted';
     const item = (id, icon, title, sub, right = '<span class="muted" style="font-size:22px">›</span>') => `<div class="op tap" data-act="panel" data-id="${esc(id)}"><div class="av">${icon}</div>`
