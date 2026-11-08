@@ -120,7 +120,7 @@ function sheet() {
         <datalist id="banks">${[...new Set(S.accounts.map(x => x.institution))].map(b => `<option value="${esc(b)}">`).join('')}</datalist>
         <div class="muted">Type de compte</div>
         <div class="chips">${Object.entries(ACC_TYPES).map(([k, [i, l]]) => chip('acctype', k, `${i} ${l}`, t === k)).join('')}</div>
-        ${empty('Un PEA ou un CTO comprend ses titres et son compte espèces : les achats de titres et les espèces de la cagnotte vont sur ce même compte.')}
+        ${empty('Un PEA ou un CTO comprend ses titres et son compte espèces : les achats de titres et ses espèces vont sur ce même compte.')}
         <label>Nom <span class="muted">(facultatif)</span><input name="name" value="${esc(a?.name)}" placeholder="par défaut : banque + type, ex. Fortuneo PEA"></label>
         <label>Solde de départ (€)<input name="opening" inputmode="decimal" value="${a ? euros(a.opening) : ''}" placeholder="0"></label>
         <details${a?.type ? ' open' : ''}><summary class="muted">Bourse : frais du courtier</summary><div style="display:grid;gap:10px;margin-top:10px">
@@ -277,7 +277,10 @@ const views = {
         const invest = x => { const v = tot(x), k = `acc:${x.id}`;
           return `<details class="tree" data-fold="${esc(k)}"${open(k)}><summary><span>${ACC_TYPES[accType(x)][0]} ${esc(x.name)}<div class="muted">${ACC_TYPES[accType(x)][1]}</div></span><b>${eur(v.total)}</b></summary>`
             + `<div class="day">📊 Valorisation des titres · ${eur(v.securities)}</div>`
-            + (vals.filter(l => l.accountId === x.id).map(l => `<div class="row"><span>${esc(l.inst.name)} <span class="muted">· ${num(l.qty)} part(s)${l.value == null ? ' · au prix d’achat' : ''}</span></span>${eur(l.value ?? l.cost)}</div>`).join('') || empty('Aucun titre sur ce compte.'))
+            + (vals.filter(l => l.accountId === x.id).map(l => `<div class="row"><span>${esc(l.inst.name)} <span class="muted">· ${num(l.qty)} part(s)${l.value == null ? ' · au prix d’achat' : ` × ${num(l.quote.price)} ${esc(l.inst.currency)}${l.fx ? ` ÷ ${num(l.fx.rate)}` : ''} · ${shortDate(l.quote.asOf)}`}</span></span>${eur(l.value ?? l.cost)}</div>`).join('') || empty('Aucun titre sur ce compte.'))
+            + ((ls => (ls.some(l => l.value == null) ? `<div class="warn">${ls.filter(l => l.value == null).length} ligne(s) comptée(s) au prix d’achat : cours absent ou à vérifier.</div>` : '')
+              + ((fx, sum) => (fx.length ? empty(`Dont ${eur(sum)} en devises étrangères : 1 % d’écart sur le taux change la valeur de ${eur(Math.round(sum / 100))}. Taux BCE du ${shortDate(fx[0].fx.asOf)}, pas celui de votre courtier.`) : ''))(
+                ls.filter(l => l.fx && l.value != null), ls.filter(l => l.fx && l.value != null).reduce((n, l) => n + l.value, 0)))(vals.filter(l => l.accountId === x.id)))
             + `<div class="day">💶 Espèces · ${eur(v.cash)}</div><form data-form="cash" class="grid2"><input type="hidden" name="date" value="${t}">`
             + `<input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(v.cash)}" aria-label="Espèces de ${esc(x.name)}" placeholder="Montant affiché par la banque"><button class="ghost">Mettre à jour</button></form></details>`; };
         return [...new Set(byBank(S.accounts).map(x => x.institution))].map(b => { const as = byBank(S.accounts).filter(x => x.institution === b), k = `bank:${b}`;
@@ -334,7 +337,7 @@ const views = {
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accTag(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
-        + (x.buy ? `<div class="good">Enveloppe : ${num(x.buy.qty)} part(s) ≈ ${eur(x.buy.total)} sur ${esc(accName(x.buy.accountId))}</div>` : '') + '</div>'
+        + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.qty ? 'good' : 'muted'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
@@ -346,9 +349,10 @@ const views = {
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
         priceChart(isin, i.currency)
         + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
+        + ((r => `<div class="day">👉 Que faire</div><div><b>${esc(x.order.text)}</b></div>${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
         + [['👍 Pour', r => r.pts > 0], ['👎 Contre', r => r.pts < 0], ['ℹ️ À savoir', r => !r.pts]].map(([t, keep]) => {
           const rs = x.reasons.filter(keep);
-          return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}</span></div>`).join('') : '';
+          return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}${r.rule ? ` <span class="tag">Règle ${r.rule}</span>` : ''}</span></div>`).join('') : '';
         }).join('')
         + (x.missing?.length ? `<div class="day">❔ Données manquantes</div>${x.missing.map(m => `<div class="muted">• ${esc(m)}</div>`).join('')}` : '')
         + (x.invalidation ? `<div class="day">🔄 Ce qui changerait l’avis</div><div class="muted">${esc(x.invalidation)}</div>` : '')
@@ -423,12 +427,9 @@ const views = {
         + (!ready ? empty('Ouvrez « Réglages bourse » en bas de page : 5 minutes de configuration, une seule fois.') : '')
         + (view.refreshing ? empty('⏳ Actualisation des cours, actualités et avis…') : lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
         + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '')
-        + `<details><summary class="muted">Comment l’outil décide</summary><div class="muted">
-          Pour chaque titre, il additionne des points : <b>+1/−1</b> si le cours est au-dessus/en dessous de sa moyenne des 50 derniers jours,
-          <b>±0,5</b> pour une forte hausse/baisse sur 3 mois, <b>±1</b> selon le ton des actualités des 14 derniers jours,
-          <b>±1 ou 2</b> si le titre s’écarte de la part que vous visez, <b>−2</b> si votre perte maximale ou votre stop est atteint.
-          Total ≥ 2 : Acheter / Renforcer. Total ≤ −2 : Alléger ; ≤ −3 : Vendre. Sinon : Conserver / Attendre.
-          Sans cours récent ou avec un cours incohérent, il ne donne pas d’avis (« Suspendu »).</div></details></section>`
+      + fold('strategy', `🧭 Ma stratégie · ${esc(B.RISK[pf.risk].label)} · ${pf.horizon} ans · ${pf.style === 'actif' ? 'actif' : 'long terme'}`,
+        B.strategyRules(S).map(r => `<div class="row"><span><b>${r.n}. ${esc(r.title)}</b><div class="muted">${esc(r.text)}</div></span></div>`).join('')
+        + empty(`Chaque avis cite la règle qui l’a décidé. Ces règles viennent de « Mon profil et mes cibles », dans Autres options. ${B.DISCLAIMER}`))
       + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (plus bas).'))
         + (lines.length ? row('Valeur des positions', total(lines), 'total') : '')
         + (missing ? `<div class="warn">${missing} ligne(s) sans cours, exclue(s) du total.</div>` : '')
@@ -444,10 +445,7 @@ const views = {
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
         + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" required></label></div>`
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
-        + `${empty('Les espèces ne bougent pas : recopiez-les dans la cagnotte. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
-      + (cash.length ? card(`💰 Ma cagnotte · ${eur(cash.reduce((n, x) => n + B.balance(S, x), 0))}`, `<form data-form="cash"><input type="hidden" name="date" value="${t}">`
-        + byBank(cash).map(x => `<label>${esc(accTag(x.id))} <span class="muted">· espèces</span><input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(B.balance(S, x))}"></label>`).join('')
-        + `<button>Mettre à jour mes comptes</button>${empty('Recopiez les espèces affichées par chaque banque (dividendes compris). L’écart est enregistré dans Mouvements, hors budget du foyer.')}</form>`) : '')
+        + `${empty('Les espèces ne bougent pas : mettez-les à jour dans Accueil, sur le compte. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       + `<details class="card fold" data-fold="more"${!ready || sr0 || view.trades || view.snap || view.open.has('more') ? ' open' : ''}><summary>⚙️ Autres options</summary>`
       + (view.search?.forIsin ? '' : searchCard())
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,

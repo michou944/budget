@@ -863,3 +863,44 @@ test('Hand-entered purchase and sale leave the cash alone, gain still counted', 
   B.addSale(s, 'b', ETF, '2026-02-01', 2, 12000);
   assert.equal(B.balance(s, b), cash); assert.equal(B.realizedGain(s, ETF), 2000);
 });
+
+test('Order: every sale says how many, on which account and under which rule', () => {
+  let s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
+  B.setHistory(s, ETF, closes(70, 0), 'test', T); // 30 % lost, flat
+  let o = verdict(s, ETF).order;
+  assert.deepEqual([o.side, o.qty, o.amount, o.rule], ['vente', 5, 35000, 4]);
+  assert.match(o.text, /Vendre 5 parts sur Fortuneo/);
+  s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
+  B.setHistory(s, ETF, closes(70, -0.3), 'test', T); // and falling: everything goes
+  const v = verdict(s, ETF);
+  assert.equal(v.action, 'Vendre'); assert.equal(v.order.qty, 10); assert.equal(v.order.rule, 4);
+});
+
+test('Order: back to the target share, the sale being the excess only', () => {
+  const s = p03(0);
+  const o = verdict(s, ETF).order; // 10 × 104,50 €, 100 % held for 60 % aimed
+  assert.equal(o.side, 'vente'); assert.equal(o.qty, 4); assert.equal(o.rule, 2);
+});
+
+test('Order: buy signals share the broker cash without an envelope, up to the target, never the savings', () => {
+  const s = p03(100000);
+  s.accounts.find(a => a.id === 'l').opening = 9000000;
+  const v = verdict(s, CW8);
+  assert.equal(v.action, 'Acheter'); assert.equal(v.order.side, 'achat'); assert.equal(v.order.qty, 1); assert.equal(v.buy.accountId, 'b');
+  assert.match(v.order.text, /Acheter 1 part sur Fortuneo/);
+  s.accounts[1].opening = 0;
+  assert.match(verdict(s, CW8).order.text, /Montant inconnu|Aucun achat possible/);
+});
+
+test('Order: a limit per line no longer crashes the purchase sizing', () => {
+  const s = p03(500000);
+  s.settings.profile.maxWeight = 70; B.addEnvelope(s, M, 120000);
+  assert.equal(verdict(s, CW8).action, 'Acheter'); assert.ok(verdict(s, CW8).buy.qty > 0);
+});
+
+test('Strategy: every title has an order pointing to a written rule', () => {
+  const s = B.demoState(T), rules = new Set(B.strategyRules(s).map(r => r.n));
+  for (const x of B.suggestions(s, T)) { assert.ok(x.order.text); assert.ok(rules.has(x.order.rule), x.name); }
+});

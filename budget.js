@@ -581,6 +581,24 @@ export const DISCLAIMER = 'Information, pas un conseil en investissement. Aucun 
 const euro = c => `${(c / 100).toFixed(2).replace('.', ',')} €`;
 const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
 
+const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
+
+// The strategy in force, written from the profile: every decision of `suggestions` names one of these rules.
+export function strategyRules(s) {
+  const p = s.settings.profile, r = RISK[p.risk], active = p.style === 'actif', targets = Object.values(p.targets).some(t => t > 0);
+  return [
+    { n: 1, title: 'Données fiables', text: 'Sans cours récent ou sans taux de change à jour : pas d’avis, aucune opération.' },
+    { n: 2, title: 'Part visée', text: targets ? `Chaque titre revient vers sa part visée, à ${p.driftPts} points près. Trop haut : vendre l’excédent. Trop bas : acheter jusqu’à la cible.` : 'Inactive : aucune part visée dans votre profil.' },
+    { n: 3, title: 'Limite par ligne', text: p.maxWeight ? `Une ligne ne dépasse pas ${p.maxWeight} % du portefeuille : au-delà, aucun renforcement.` : 'Inactive : pas de limite dans votre profil.' },
+    { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : vendre la moitié.` },
+    { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
+    { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
+    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération.' },
+    { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
+    { n: 9, title: 'Argent des achats', text: 'L’enveloppe du mois va au meilleur signal. Les autres signaux se partagent à parts égales les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés.' },
+  ];
+}
+
 // One verdict per followed title, merging allocation, price trend, news tone and the profile's risk limits.
 // Each reason carries its points (+ favours buying, − favours selling), and its date and source when it has one.
 export function suggestions(s, today) {
@@ -595,7 +613,8 @@ export function suggestions(s, today) {
 
   const out = s.instruments.map(i => {
     const isHeld = held.has(i.isin), q = s.quotes[i.isin], reasons = [];
-    const add = (pts, text, asOf, source) => reasons.push({ pts, text, asOf, source });
+    const add = (pts, text, asOf, source, rule) => reasons.push({ pts, text, asOf, source, rule });
+    const none = (rule, text) => ({ side: null, qty: 0, rule, text });
     const base = { isin: i.isin, name: i.name, held: isHeld, reasons };
     const fxOk = i.currency === 'EUR' || !isStale(s.fx[i.currency]?.asOf, today);
     // a missing or stale price suspends the verdict instead of guessing
@@ -603,16 +622,19 @@ export function suggestions(s, today) {
     if (!q || q.currency !== i.currency || isStale(q.asOf, today) || !fxOk || odd) {
       add(0, !q ? 'Aucun cours : actualisez ou saisissez-le.' : !fxOk ? `Taux de change ${i.currency} absent ou périmé.`
         : odd ? `Cours à vérifier : ${q.price} ${q.currency} donnerait une ligne sans rapport avec les ${euro(odd.cost)} investis (mauvaise cotation ?).`
-          : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source);
-      return { ...base, action: 'Suspendu', score: 0, suspended: true };
+          : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source, 1);
+      return { ...base, action: 'Suspendu', score: 0, suspended: true, order: none(1, 'Aucune opération tant que le cours n’est pas à jour.') };
     }
-    const t = p.targets[i.isin] ?? 0;
+    const t = p.targets[i.isin] ?? 0, own = lines.filter(l => l.isin === i.isin), cuts = [], allValue = byIsin[i.isin] ?? 0;
+    // what brings the title back to c % of the portfolio, the money going to the others
+    const backTo = c => (allValue ? Math.min(1, (allValue - (c * total) / 100) / allValue) : 0);
     if (hasTargets && (t > 0 || isHeld)) {
-      if (blocked.length) add(0, `Allocation non calculée : cours manquant ou périmé pour ${blocked.join(', ')}.`);
+      if (blocked.length) add(0, `Allocation non calculée : cours manquant ou périmé pour ${blocked.join(', ')}.`, undefined, undefined, 1);
       else {
         const w = weight(i.isin), gap = t - w, far = Math.abs(gap);
         const pts = far < p.driftPts ? 0 : Math.sign(gap) * (far >= 2 * p.driftPts ? 2 : 1);
-        add(pts, `Poids ${pct(w)} pour une cible de ${pct(t)}${pts ? ` : ${pts > 0 ? 'sous' : 'sur'}-pondéré de ${far.toFixed(1).replace('.', ',')} points` : ', dans la tolérance'}.`);
+        add(pts, `Poids ${pct(w)} pour une cible de ${pct(t)}${pts ? ` : ${pts > 0 ? 'sous' : 'sur'}-pondéré de ${far.toFixed(1).replace('.', ',')} points` : ', dans la tolérance'}.`, undefined, undefined, 2);
+        if (pts < 0 && t > 0) cuts.push({ rule: 2, share: backTo(t), ls: own });
       }
     }
     const tr = trend(s, i.isin), active = p.style === 'actif';
@@ -620,11 +642,11 @@ export function suggestions(s, today) {
     if (tr) {
       const gap = (q.price / tr.sma50 - 1) * 100, longUp = tr.first < tr.sma50;
       // active style: a dip inside a rising trend is a chance to buy back, instead of a sell signal
-      if (active && gap <= -7 && longUp) add(2, `Repli de ${pct(-gap)} sous sa moyenne 50 jours alors que la tendance de fond monte : occasion de (r)acheter.`, tr.asOf, q.source);
+      if (active && gap <= -7 && longUp) add(2, `Repli de ${pct(-gap)} sous sa moyenne 50 jours alors que la tendance de fond monte : occasion de (r)acheter.`, tr.asOf, q.source, 6);
       else {
         const up = q.price >= tr.sma50;
-        add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source);
-        if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source);
+        add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source, 7);
+        if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source, 7);
       }
       if (active && isHeld && gap >= 12) takeProfit = gap;
     } else add(0, 'Tendance inconnue : historique insuffisant (actualisez en ligne).');
@@ -632,32 +654,34 @@ export function suggestions(s, today) {
     const tones = recent.map(n => n.sentiment).filter(Number.isFinite);
     if (tones.length >= 2) {
       const avg = tones.reduce((a, b) => a + b, 0) / tones.length;
-      add(avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0, `Ton des actualités ${avg > 0.2 ? 'positif' : avg < -0.2 ? 'négatif' : 'neutre'} (${tones.length} articles sur 14 jours).`, recent[0].publishedAt, 'Marketaux');
+      add(avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0, `Ton des actualités ${avg > 0.2 ? 'positif' : avg < -0.2 ? 'négatif' : 'neutre'} (${tones.length} articles sur 14 jours).`, recent[0].publishedAt, 'Marketaux', 7);
     } else if (!recent.length && !s.discovery?.items?.[i.isin]) add(0, 'Aucune actualité récente.');
     const found = s.discovery?.items?.[i.isin];
-    if (found) add(found.tone >= 0.2 ? 1 : 0, `Repéré par l’outil : ${found.docs} articles cette semaine, ton ${found.tone >= 0.2 ? 'positif' : 'plutôt neutre'} (${found.tone.toFixed(2).replace('.', ',')}).`, found.asOf, 'Marketaux');
+    if (found) add(found.tone >= 0.2 ? 1 : 0, `Repéré par l’outil : ${found.docs} articles cette semaine, ton ${found.tone >= 0.2 ? 'positif' : 'plutôt neutre'} (${found.tone.toFixed(2).replace('.', ',')}).`, found.asOf, 'Marketaux', 7);
     const notable = recent.filter(n => NOTABLE.test(n.title));
-    for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source);
+    for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source, 8);
     let limitHit = false;
     const mine = lines.filter(l => l.isin === i.isin && l.cost > 0), gainAll = mine.reduce((a, l) => a + l.gain, 0);
     if (takeProfit && gainAll > 0) { // active style: sell part of a strong rise, buy back later on a dip
       limitHit = true;
       const pea = mine.every(l => s.accounts.find(a => a.id === l.accountId)?.type === 'PEA');
       add(-2, `Forte hausse : ${pct(takeProfit)} au-dessus de sa moyenne 50 jours, avec ${euro(gainAll)} de plus-value : prendre une partie des bénéfices (vendre environ un tiers).`
-        + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposable.'));
+        + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposable.'), undefined, undefined, 6);
+      cuts.push({ rule: 6, share: 1 / 3, ls: own });
     }
     for (const l of mine) {
       const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
       const drop = hi ? ((hi - q.price) * 100) / hi : 0;
-      if (gain <= -risk.maxLoss) { limitHit = true; add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`); }
+      if (gain <= -risk.maxLoss) { limitHit = true; cuts.push({ rule: 4, share: 0.5, ls: [l] }); add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`, undefined, undefined, 4); }
       else if (p.horizon < 5 && gain > 0 && drop >= risk.trail) {
         limitHit = true;
-        add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`);
+        cuts.push({ rule: 5, share: 0.5, ls: [l] });
+        add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`, undefined, undefined, 5);
       }
     }
     // concentration limit per line: above it, never « Renforcer », whatever the other signals say
     const overCap = isHeld && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
-    if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`);
+    if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`, undefined, undefined, 3);
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
     const action = notable.length ? 'À examiner'
@@ -671,13 +695,31 @@ export function suggestions(s, today) {
       ? `Revoir si le cours repasse au-dessus de ${two(ind.sma50 ?? level)} ${i.currency} (moyenne 50 jours).`
       : `Revoir si le cours passe sous ${two(level)} ${i.currency} (moyenne ${ind.sma200 ? 200 : 50} jours)${notable.length ? ' ou après lecture de l’actualité signalée' : ''}.`;
     const confidence = ind?.sma200 && tones.length >= 2 ? 'Élevée' : ind?.sma50 ? 'Moyenne' : 'Faible';
-    return { ...base, action, score, missing, invalidation, confidence };
+    const worst = [...reasons].filter(r => r.pts < 0).sort((a, b) => a.pts - b.pts)[0]?.rule ?? 7;
+    let order = overCap ? none(3, 'Aucun achat : la ligne dépasse votre limite. Aucune vente demandée.') : none(7, 'Aucune opération : ni signal d’achat ni signal de vente.');
+    if (action === 'À examiner') order = none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.');
+    if (action === 'Vendre' || action === 'Alléger') {
+      if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
+      // the strongest rule triggered sets the size; a signal alone sells a third
+      const cut = action === 'Vendre' ? { rule: worst, share: 1, ls: own } : [...cuts].sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
+      const sells = cut.ls.map(l => {
+        const a = s.accounts.find(x => x.id === l.accountId), x = l.qty * cut.share;
+        const qty = cut.share === 1 ? l.qty : Math.min(l.qty, a?.fractional || !Number.isInteger(l.qty) ? Math.floor(x * 1000) / 1000 : Math.ceil(x - 1e-9));
+        return { accountId: l.accountId, name: a?.name ?? '?', qty, amount: Math.round((l.value * qty) / l.qty) };
+      }).filter(x => x.qty > 0);
+      order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule,
+        text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
+    }
+    return { ...base, action, score, missing, invalidation, confidence, order };
   });
 
   // this month's envelope goes to the strongest buy signal, within the remaining amount and the broker's cash
   const left = s.envelopes.filter(e => e.month === monthOf(today)).reduce((a, e) => a + envelopeLeft(s, e), 0);
-  const pick = left > 0 && out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score)[0];
-  if (pick) {
+  const signals = out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score);
+  const spare = Object.fromEntries(s.accounts.map(a => [a.id, Math.max(0, balance(s, a))]));
+  signals.forEach((pick, k) => {
+    const env = k === 0 && left > 0, src = env ? 'Enveloppe du mois' : 'Espèces du compte';
+    const rule = [...pick.reasons].filter(r => r.pts > 0).sort((a, b) => b.pts - a.pts)[0]?.rule ?? 7;
     const i = s.instruments.find(x => x.isin === pick.isin), line = lines.find(l => l.isin === pick.isin);
     // a held title is topped up where it is held; a new one goes to any brokerage account allowed to hold it
     const accounts = (line ? [s.accounts.find(a => a.id === line.accountId)]
@@ -693,26 +735,34 @@ export function suggestions(s, today) {
       const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);
       // never buy so much that the line would pass the concentration limit
       const room = p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
-      const limit = Math.max(0, Math.min(known ? Math.min(left, cash) : left, room));
+      const pool = env ? (known ? Math.min(left, spare[a.id]) : left) : known ? Math.floor(spare[a.id] / (signals.length - k)) : 0;
+      const aim = p.targets[i.isin] ?? 0, toTarget = !env && aim > 0 && aim < 100 && total ? Math.max(0, Math.round(((aim * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - aim / 100))) : Infinity; // new money also grows the total
+      const limit = Math.max(0, Math.min(pool, room, toTarget));
       const qty = a.fractional ? Math.max(0, Math.floor(((limit - fixed) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - fixed) / unit));
-      const total = qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + fixed : 0;
-      return { a, limit, qty, unit, total, fees: qty ? total - Math.round((qty * price * 100) / rate) : 0,
-        where: !known ? 'reliquat de l’enveloppe, encaisse inconnue' : cash < left ? `limité par l’encaisse ${a.name}` : 'reliquat de l’enveloppe' };
+      const spend = qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + fixed : 0;
+      return { a, limit, qty, unit, total: spend, known, fees: qty ? spend - Math.round((qty * price * 100) / rate) : 0,
+        where: !env ? `espèces de ${a.name}, part de ce signal` : !known ? 'reliquat de l’enveloppe, encaisse inconnue' : cash < left ? `limité par l’encaisse ${a.name}` : 'reliquat de l’enveloppe' };
     };
     const plans = accounts.map(plan);
     // a PEA wins when it can buy (less tax after 5 years); otherwise the account buying the most, then the cheapest
     const best = [...plans].sort((x, y) => (y.qty > 0) - (x.qty > 0) || (y.a.type === 'PEA') - (x.a.type === 'PEA') || y.total - x.total || x.fees - y.fees)[0];
-    const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
-    if (!best) pick.reasons.push({ pts: 0, text: 'Enveloppe du mois : aucun compte titres ne peut recevoir ce titre (le PEA est réservé aux titres européens).' });
-    else if (!best.qty) pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${euro(best.limit)} disponibles (${best.where}), insuffisant pour une part (${euro(best.unit)}) et les frais. Un compte acceptant les fractions de parts le permettrait.` });
-    else {
+    if (!best) {
+      pick.reasons.push({ pts: 0, rule: 9, text: `${src} : aucun compte titres ne peut recevoir ce titre (le PEA est réservé aux titres européens).` });
+      pick.order = { side: 'achat', qty: 0, rule: 9, text: 'Aucun achat possible : aucun de vos comptes ne peut recevoir ce titre.' };
+    } else if (!best.qty) {
+      pick.reasons.push({ pts: 0, rule: 9, text: `${src} : ${euro(best.limit)} disponibles (${best.where}), insuffisant pour une part (${euro(best.unit)}) et les frais. Un compte acceptant les fractions de parts le permettrait.` });
+      pick.order = { side: 'achat', qty: 0, rule: 9, text: best.known || env ? `Aucun achat possible : ${euro(best.limit)} disponibles sur ${best.a.name}, moins qu’une part (${euro(best.unit)}) et ses frais.`
+        : `Montant inconnu : indiquez les espèces de ${best.a.name} dans Accueil.` };
+    } else {
+      spare[best.a.id] -= best.total;
+      pick.order = { side: 'achat', qty: best.qty, amount: best.total, accountId: best.a.id, rule, text: `Acheter ${parts(best.qty)} sur ${best.a.name} (≈ ${euro(best.total)}, frais inclus)` };
       pick.buy = { qty: best.qty, total: best.total, fees: best.fees, limit: best.limit, accountId: best.a.id };
-      pick.reasons.push({ pts: 0, text: `Enveloppe du mois : ${parts(best.qty)} sur ${best.a.name}${best.a.type === 'PEA' ? ' (PEA : moins d’impôts après 5 ans)' : ''}`
+      pick.reasons.push({ pts: 0, rule: 9, text: `${src} : ${parts(best.qty)} sur ${best.a.name}${best.a.type === 'PEA' ? ' (PEA : moins d’impôts après 5 ans)' : ''}`
         + ` pour environ ${euro(best.total)}, dont ${euro(best.fees)} de frais (${best.where} : ${euro(best.limit)}).` });
       const others = plans.filter(x => x.qty && x !== best);
       if (others.length) pick.reasons.push({ pts: 0, text: `Frais pour ce même montant ailleurs : ${others.map(x => `${x.a.name} ${euro(x.fees)}`).join(' · ')}.` });
     }
-  }
+  });
   return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
 }
 
@@ -727,7 +777,7 @@ export function pendingNotifications(s, today) {
     if (x.suspended || !ACTIONABLE.includes(x.action) || n.verdicts[x.isin] === x.action) continue;
     const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
     out.push({ id: `v|${x.isin}|${x.action}`, kind: 'verdict', action: x.action, name: x.name, title: `${x.action} : ${x.name}`,
-      body: (x.buy ? `Enveloppe : ${String(x.buy.qty).replace('.', ',')} part(s) ≈ ${euro(x.buy.total)}. ` : '') + (main?.text ?? '') });
+      body: (x.order?.qty ? `${x.order.text}. ` : '') + (main?.text ?? '') });
   }
   // budget alerts are announced once per month and threshold
   const st = monthStats(s, m), low = s.settings.lowSpendable;
