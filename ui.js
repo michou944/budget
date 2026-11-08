@@ -381,7 +381,7 @@ const views = {
           S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
-          + `<div class="muted">${esc(n.source)} · ${n.publishedAt}</div></div></div>`).join('') || empty('Aucune actualité.'))
+          + `<div class="muted">${esc(n.source)} · ${n.publishedAt}${Number.isFinite(n.sentiment) ? ` · ton ${n.sentiment > 0.2 ? 'positif' : n.sentiment < -0.2 ? 'négatif' : 'neutre'}` : ''}</div></div></div>`).join('') || empty('Aucune actualité sur les 14 derniers jours.'))
         + '<details style="margin-top:12px"><summary><b>⚙️ Gérer ce titre</b> <span class="muted">compte, vente, division</span></summary>'
         + lines.filter(l => l.isin === isin).map(l => ((to => (to.length ? `<form data-form="move" style="margin-top:8px"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="from" value="${esc(l.accountId)}">`
           + `<b>Sur ${esc(accTag(l.accountId))}</b> <span class="muted">· ${num(l.qty)} part(s) · le déplacer vers :</span><div class="chips">${to.map((a, n) => chip('to', a.id, esc(accTag(a.id)), !n)).join('')}</div>`

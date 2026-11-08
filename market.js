@@ -142,17 +142,20 @@ export async function refreshNews(s, today, fetchFn = fetch) {
   const m = s.settings.market, errors = [];
   if (!m.enabled) throw new Error('Données de marché désactivées');
   if (!newsOn(m)) return ['Clé Marketaux manquante : actualités non actualisées'];
-  for (const i of byImportance(s, today).filter(i => s.newsFetched[i.isin] !== today)) {
-    const q = newsQuery(i);
+  // without a date Marketaux answers by relevance: articles years old, all thrown away by pruneNews
+  const since = new Date(Date.parse(today) - 14 * 864e5).toISOString().slice(0, 10), done = `${today}:recent`; // new mark: today's fetches of old articles are redone
+  for (const i of byImportance(s, today).filter(i => s.newsFetched[i.isin] !== done)) {
+    const q = newsQuery(i), word = companyWord(i.name);
     let j;
-    try { j = await mx(s, `news/all?search=${enc(`"${q}"`)}&language=fr,en`, [q], fetchFn); }
+    try { j = await mx(s, `news/all?search=${enc(`"${q}"`)}&language=fr,en&sort=published_desc&published_after=${since}`, [q], fetchFn); }
     catch (e) { errors.push(`${q} : ${e.message}`); if (/HTTP (401|402|429)/.test(e.message)) break; continue; } // bad key or quota: stop
     for (const a of j.data ?? []) {
-      const tones = (a.entities ?? []).map(e => e.sentiment_score).filter(Number.isFinite);
+      // an article's tone counts only for this company, not for the others it names
+      const tones = (a.entities ?? []).filter(e => !e.name || plainWords(e.name).includes(word)).map(e => e.sentiment_score).filter(Number.isFinite);
       addNews(s, i.isin, { title: a.title, url: a.url, source: a.source, publishedAt: a.published_at,
         sentiment: tones.length ? tones.reduce((x, y) => x + y, 0) / tones.length : null }, today);
     }
-    s.newsFetched[i.isin] = today;
+    s.newsFetched[i.isin] = done;
   }
   pruneNews(s, today);
   return errors;
@@ -160,7 +163,8 @@ export async function refreshNews(s, today, fetchFn = fetch) {
 
 // First meaningful word of a company name (« SONY ADR » and « Sony Group Corporation » → sony), to spot duplicates.
 const GENERIC = new Set(['the', 'adr', 'ads', 'inc', 'corp', 'group', 'holdings', 'holding', 'company', 'plc', 'ltd']);
-export const companyWord = name => String(name).toLowerCase().normalize('NFD').replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).find(w => w.length > 2 && !GENERIC.has(w)) ?? '';
+const plainWords = t => String(t).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, ' ');
+export const companyWord = name => plainWords(name).split(/\s+/).find(w => w.length > 2 && !GENERIC.has(w)) ?? '';
 
 // Marketaux symbol → Alpha Vantage symbol and listing currency; markets the app cannot price are skipped.
 // shortcut: US, Paris, Xetra and Amsterdam only; London (prices in pence) and others left out.

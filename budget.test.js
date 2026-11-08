@@ -904,3 +904,18 @@ test('Strategy: every title has an order pointing to a written rule', () => {
   const s = B.demoState(T), rules = new Set(B.strategyRules(s).map(r => r.n));
   for (const x of B.suggestions(s, T)) { assert.ok(x.order.text); assert.ok(rules.has(x.order.rule), x.name); }
 });
+
+test('News: only recent articles are asked for, the tone is the company own, broker names are cleaned', async () => {
+  const { refreshNews } = await import('./market.js');
+  const s = withInstruments(); s.instruments = [{ isin: 'FR0000120271', name: 'TOTALENERGIES', symbol: '', currency: 'EUR' }];
+  Object.assign(s.settings.market, { enabled: true, newsKey: 'K' });
+  s.newsFetched.FR0000120271 = T; // fetched earlier today by the old query: done again
+  const calls = [];
+  await refreshNews(s, T, async url => { calls.push(url); return { ok: true, json: async () => ({ data: [{ title: 'A', url: 'https://ex.com/a', source: 'x', published_at: '2026-11-02',
+    entities: [{ name: 'TotalEnergies SE', sentiment_score: 0.4 }, { name: 'Adani Green', sentiment_score: -0.9 }] }] }) }; });
+  assert.match(calls[0], /published_after=2026-10-20/); assert.match(calls[0], /sort=published_desc/);
+  assert.equal(s.news[0].sentiment, 0.4);
+  assert.equal(B.newsQuery({ name: 'SONY FINANCIAL GR UNSPON ADS EACH REP 5 ORD' }), 'SONY FINANCIAL');
+  assert.equal(B.newsQuery({ name: 'SONY ADR' }), 'SONY');
+  assert.equal(B.newsQuery({ name: 'AMUNDI PEA MONDE (MSCI World) UCITS ETF - Acc EUR ACC' }), 'MSCI World');
+});

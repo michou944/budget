@@ -279,8 +279,8 @@ export function saveInstrument(s, f) {
 
 // Broad ETFs rarely make headlines themselves: their news is searched by index name.
 export function newsQuery(i) {
-  const idx = i.name.match(/MSCI [A-Z][\w ]*?(?= UCITS| ETF| \(|$)|S&P ?500|NASDAQ[- ]?100|STOXX ?(Europe )?\d+|CAC ?40|DAX/i);
-  return (idx ? idx[0] : i.name.replace(/\(.*?\)|\b(UCITS|ETF|Acc|Dist|SE|SA|Inc|Corp|PLC)\b\.?/gi, '')).replace(/\s+/g, ' ').trim();
+  const idx = i.name.match(/MSCI [A-Z][\w ]*?(?= UCITS| ETF| \(|\)|$)|S&P ?500|NASDAQ[- ]?100|STOXX ?(Europe )?\d+|CAC ?40|DAX/i);
+  return (idx ? idx[0] : i.name.replace(/\b(UN)?SPONS?\b.*$/i, '').replace(/\(.*?\)|\b(UCITS|ETF|Acc|Dist|SE|SA|Inc|Corp|PLC|ADR|ADS|GR)\b\.?/gi, '')).replace(/\s+/g, ' ').trim();
 }
 
 // Daily closes from the price provider: keeps the last 100 and makes the latest one the current quote.
