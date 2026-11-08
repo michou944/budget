@@ -15,10 +15,10 @@ const op = (s, kind, euros, extra = {}) => B.saveOp(s, { accountId: 'a', date: `
 
 test('B02: à date / prévu, then reconciliation counts once', () => {
   const s = base();
-  op(s, 'income', 2500); op(s, 'expense', 1200); op(s, 'expense', 500, { planned: true });
+  op(s, 'income', 2500); op(s, 'expense', 1200); op(s, 'expense', 500, { planned: true, label: 'Assurance' });
   let st = B.monthStats(s, M);
   assert.equal(st.toDate, 130000); assert.equal(st.forecast, 80000);
-  op(s, 'expense', 480); // the real payment, a little different from what was planned, settles it on its own
+  op(s, 'expense', 480, { label: 'Assurance' }); // the real payment, a little different from what was planned, settles it on its own
   st = B.monthStats(s, M);
   assert.equal(st.toDate, 82000); assert.equal(st.forecast, 82000);
 });
@@ -32,7 +32,7 @@ test('An upcoming item counts as paid on its due date; the real payment entered 
   assert.equal(B.monthStats(s, M).spent, 19000);
   B.saveOp(s, { accountId: 'a', date: `${M}-11`, kind: 'expense', cents: 15200, categoryId: cat, label: 'PRLV ASSURANCE' }); // the bank's real debit
   assert.equal(B.monthStats(s, M).spent, 19200); // 152 € replaces 150 €, not added to it
-  assert.equal(s.ops.filter(o => /ssurance/i.test(o.label)).length, 1);
+  assert.equal(s.ops.filter(o => /ssurance/i.test(o.label) && !o.planned).length, 1); // the paid-on-date line stands aside
 });
 
 test('A price far from what was paid is set aside as « à vérifier » instead of showing a false loss', () => {
@@ -106,7 +106,7 @@ test('B04: stale account flagged; encrypted backup restores accounts and ops', a
 
 test('Réserve + enveloppe bourse scenario', () => {
   const s = base();
-  op(s, 'income', 2500); op(s, 'expense', 1200); op(s, 'expense', 500, { planned: true });
+  op(s, 'income', 2500); op(s, 'expense', 1200); op(s, 'expense', 500, { planned: true, label: 'Assurance' });
   s.settings.reserve = 30000;
   assert.equal(B.monthStats(s, M).spendable, 50000);
   assert.equal(B.monthStats(s, M).savedTransfer, 0);
@@ -632,7 +632,7 @@ test('Active style: take part of the profit after a strong rise, buy back on a d
   s.settings.profile.style = 'actif';
   B.setHistory(s, ETF, [...closes(100, 0.1).slice(0, 99), [T, 115]], 'Alpha Vantage', T); // jumps 115 % of its average
   let v = verdict(s, ETF);
-  assert.equal(v.action, 'Alléger'); assert.ok(v.reasons.some(r => /prendre une partie des bénéfices/.test(r.text) && /imposé à 30 %/.test(r.text)));
+  assert.equal(v.action, 'Alléger'); assert.ok(v.reasons.some(r => /prendre une partie des bénéfices/.test(r.text) && /imposable/.test(r.text)));
   s.settings.profile.style = 'long';
   assert.equal(verdict(s, ETF).action, 'Conserver'); // long term: no take-profit rule
   s.settings.profile.style = 'actif';
@@ -801,4 +801,65 @@ test('Wealth over time: cash and titles at each month end, titles at the close o
   assert.equal(jun.total, jun.cash + 110000); assert.ok(open !== undefined && cash0 === apr.cash);
   B.setQuote(s, ETF, 125, T); assert.equal(B.wealthSeries(s, ['2026-11'], T)[0].securities, 125000); // today: latest price, as on the accounts
   delete s.history[ETF]; assert.equal(B.wealthSeries(s, ['2026-06'], T)[0].securities, 90000); // no close: at cost
+});
+
+const dueState = () => { const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'BCP', opening: 100000, liquid: true }, { id: 'b', name: 'X', opening: 0 }); return s; };
+const pay = (cents, label, date = '2026-11-03', accountId = 'a') => ({ cents, kind: 'expense', accountId, date, label });
+const nov = s => B.monthStats(s, '2026-11');
+
+test('Due items: a payment with another label never settles or erases them', () => {
+  let s = dueState();
+  B.saveOp(s, { ...pay(1599, 'Netflix'), planned: true }); B.settleDue(s, '2026-11-04');
+  B.saveOp(s, pay(1200, 'Boulangerie', '2026-11-05'));
+  assert.equal(B.balance(s, s.accounts[0]), 100000 - 1599 - 1200); assert.equal(s.ops.length, 2);
+  s = dueState();
+  B.saveOp(s, { ...pay(1599, 'Netflix', '2026-11-20'), planned: true }); B.saveOp(s, pay(1200, 'Boulangerie', '2026-11-05'));
+  assert.equal(nov(s).expectedSpent, 1599);
+});
+
+test('Due items: same result whichever is entered first, bank labels recognised', () => {
+  for (const order of [[true, false], [false, true]]) {
+    const s = dueState();
+    for (const planned of order) B.saveOp(s, planned ? { ...pay(8371, 'Assurance auto'), planned } : pay(8371, 'PRLV SEPA MAIF ASSURANCE'));
+    assert.deepEqual([nov(s).spent, nov(s).expectedSpent, nov(s).forecast], [8371, 0, -8371]);
+    B.settleDue(s, '2026-11-04');
+    assert.equal(B.balance(s, s.accounts[0]), 91629); // not debited twice once the date has passed
+  }
+});
+
+test('Due items: a recurring item generated after its payment is linked too', () => {
+  const s = dueState();
+  B.saveOp(s, pay(90000, 'Loyer', '2026-11-01'));
+  s.recurring.push({ id: 'r', accountId: 'a', day: 5, cents: 90000, kind: 'expense', categoryId: null, label: 'Loyer' });
+  B.generateRecurring(s, '2026-11');
+  assert.equal(nov(s).expectedSpent, 0);
+});
+
+test('Due items: two identical payments stay two, other accounts are not merged', () => {
+  let s = dueState();
+  B.saveOp(s, { ...pay(8371, 'Assurance'), planned: true }); B.saveOp(s, pay(8371, 'Assurance')); B.saveOp(s, pay(8371, 'Assurance'));
+  assert.equal(nov(s).spent, 16742); assert.equal(s.ops.filter(o => o.plannedId).length, 1);
+  s = dueState();
+  B.saveOp(s, { ...pay(8371, 'Assurance'), planned: true }); B.saveOp(s, pay(8371, 'Assurance', '2026-11-03', 'b'));
+  assert.equal(nov(s).expectedSpent, 8371);
+});
+
+test('Due items: deleting the payment brings the due item back, without double counting', () => {
+  let s = dueState();
+  B.saveOp(s, { ...pay(8371, 'Assurance'), planned: true });
+  let r = B.saveOp(s, pay(8371, 'Assurance')); B.deleteOp(s, r.id);
+  assert.deepEqual([nov(s).spent, nov(s).expectedSpent], [0, 8371]);
+  s = dueState();
+  B.saveOp(s, { ...pay(8371, 'Assurance'), planned: true }); B.settleDue(s, '2026-11-04');
+  r = B.saveOp(s, pay(8371, 'Assurance'));
+  assert.equal(B.balance(s, s.accounts[0]), 91629); assert.equal(B.settleDue(s, '2026-11-04'), 0); // the paid-on-date line stands aside
+  B.deleteOp(s, r.id); B.settleDue(s, '2026-11-04');
+  assert.equal(B.balance(s, s.accounts[0]), 91629); assert.equal(s.ops[0].autoPaid, true);
+});
+
+test('Hand-entered purchase and sale leave the cash alone, gain still counted', () => {
+  const s = withInstruments(), b = s.accounts.find(a => a.id === 'b'), cash = B.balance(s, b);
+  B.addPurchase(s, { accountId: 'b', isin: ETF, date: '2026-01-01', qty: 2, cents: 10000 });
+  B.addSale(s, 'b', ETF, '2026-02-01', 2, 12000);
+  assert.equal(B.balance(s, b), cash); assert.equal(B.realizedGain(s, ETF), 2000);
 });

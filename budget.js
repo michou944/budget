@@ -128,7 +128,7 @@ export function saveOp(s, f, id) {
   if (!Number.isInteger(f.cents) || f.cents <= 0) throw new Error('Montant invalide');
   const fields = { accountId: f.accountId, date: f.date, kind: f.kind, amount: signed(f.kind, f.cents),
     categoryId: f.categoryId || null, label: (f.label || '').trim(), planned: !!f.planned };
-  if (!id) { const o = { id: uid(), ...fields }; s.ops.push(o); autoMatch(s, o); return o; }
+  if (!id) { const o = { id: uid(), ...fields }; s.ops.push(o); if (o.planned) linkPaid(s, o); else autoMatch(s, o); return o; }
   const o = s.ops.find(x => x.id === id);
   if (!o || o.transferId || o.envelopeId) throw new Error('Opération non modifiable ici');
   Object.assign(o, fields);
@@ -193,16 +193,32 @@ export const unmatch = unmatchPlanned;
 // A real operation that looks like a planned one settles it, so it is never counted twice: same month and
 // direction, same account or category, amount within 10 % (at least 5 €). The closest amount wins.
 // The same test also finds an item already counted as paid on its due date: the real payment then replaces it.
+const GENERIC_WORDS = new Set(['prlv', 'sepa', 'prelevement', 'paiement', 'carte', 'virement', 'vir', 'facture', 'abonnement', 'echeance', 'mensualite', 'cotisation', 'achat', 'pour', 'les', 'des']);
+const labelWords = t => String(t ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9]+/)
+  .filter(w => w.length > 2 && !/^\d+$/.test(w) && !GENERIC_WORDS.has(w));
+// Same item only if the labels share a real word; without a label, the category has to say it. Amount alone proves nothing.
+function sameItem(due, real) {
+  const a = labelWords(due.label), b = new Set(labelWords(real.label));
+  return a.length && b.size ? a.some(w => b.has(w)) : !!due.categoryId && due.categoryId === real.categoryId;
+}
+const pays = (due, real) => due.kind === real.kind && monthOf(due.date) === monthOf(real.date)
+  && (due.accountId === real.accountId || (due.categoryId && due.categoryId === real.categoryId))
+  && Math.abs(due.amount - real.amount) <= Math.max(500, Math.abs(due.amount) * 0.1) && sameItem(due, real);
+const closest = (list, amount) => [...list].sort((a, b) => Math.abs(a.amount - amount) - Math.abs(b.amount - amount))[0];
+
 export function autoMatch(s, real) {
   if (real.planned || real.plannedId || real.autoPaid || !['income', 'expense', 'refund'].includes(real.kind)) return false;
   const taken = new Set(s.ops.map(o => o.plannedId).filter(Boolean));
-  const p = s.ops.filter(x => (x.planned || x.autoPaid) && x !== real && !taken.has(x.id) && x.kind === real.kind && monthOf(x.date) === monthOf(real.date)
-      && (x.accountId === real.accountId || (x.categoryId && x.categoryId === real.categoryId))
-      && Math.abs(x.amount - real.amount) <= Math.max(500, Math.abs(x.amount) * 0.1))
-    .sort((a, b) => Math.abs(a.amount - real.amount) - Math.abs(b.amount - real.amount))[0];
-  if (p?.autoPaid) s.ops = s.ops.filter(x => x !== p);
-  else if (p) real.plannedId = p.id;
-  return !!p;
+  const p = closest(s.ops.filter(x => (x.planned || x.autoPaid) && x !== real && !taken.has(x.id) && pays(x, real)), real.amount);
+  if (!p) return false;
+  if (p.autoPaid) { p.planned = true; delete p.autoPaid; } // kept aside, not erased: it comes back if this payment is deleted
+  real.plannedId = p.id;
+  return true;
+}
+// The same link when the due item is entered after its payment.
+function linkPaid(s, due) {
+  const r = closest(s.ops.filter(o => !o.planned && !o.autoPaid && !o.plannedId && pays(due, o)), due.amount);
+  if (r) r.plannedId = due.id;
 }
 
 // Upcoming items are taken as paid on their due date (direct debits, standing orders): no button to press.
@@ -220,8 +236,9 @@ export function generateRecurring(s, m) {
   let n = 0;
   for (const r of s.recurring) {
     if (s.ops.some(o => o.recurringId === r.id && monthOf(o.date) === m)) continue;
-    s.ops.push({ id: uid(), accountId: r.accountId, date: `${m}-${String(Math.min(r.day, last)).padStart(2, '0')}`,
-      amount: signed(r.kind, r.cents), kind: r.kind, categoryId: r.categoryId, label: r.label, planned: true, recurringId: r.id });
+    const due = { id: uid(), accountId: r.accountId, date: `${m}-${String(Math.min(r.day, last)).padStart(2, '0')}`,
+      amount: signed(r.kind, r.cents), kind: r.kind, categoryId: r.categoryId, label: r.label, planned: true, recurringId: r.id };
+    s.ops.push(due); linkPaid(s, due);
     n++;
   }
   return n;
@@ -376,13 +393,13 @@ export function moveHolding(s, isin, fromId, toId) {
   for (const o of s.ops.filter(o => o.accountId === fromId && o.isin === isin)) Object.assign(o, { accountId: toId, seq: stamp(s) });
 }
 
-// Records a sale already done at the broker; proceeds land in the broker account, not in the household budget.
+// Records a sale already done at the broker. Like a purchase, only the title moves: the cash is typed in the cagnotte.
 export function addSale(s, accountId, isin, date, qty, cents) {
   checkTrade(s, isin, qty);
   const held = positions(s).find(p => p.accountId === accountId && p.isin === isin)?.qty ?? 0;
   if (qty > held + 1e-9) throw new Error('Quantité supérieure à la position');
   if (!Number.isInteger(cents) || cents <= 0) throw new Error('Montant invalide');
-  s.ops.push({ id: uid(), accountId, date, amount: cents, kind: 'invest', isin, qty: -qty, label: `Vente ${s.instruments.find(i => i.isin === isin).name}`, seq: stamp(s) });
+  s.ops.push({ id: uid(), accountId, date, amount: 0, proceeds: cents, kind: 'invest', isin, qty: -qty, label: `Vente ${s.instruments.find(i => i.isin === isin).name}`, seq: stamp(s) });
 }
 
 // Removes a title entered by mistake, with everything attached to it (trades, snapshot lines, prices, news, target).
@@ -416,7 +433,7 @@ function book(s, until) {
     if (o.split) p.qty = Math.round(p.qty * o.split * 1e6) / 1e6;
     else {
       if (o.qty > 0) p.cost += o.cost ?? -o.amount;
-      else { const out = p.qty > 0 ? Math.round((p.cost * -o.qty) / p.qty) : 0; p.cost -= out; p.realized += o.amount - out; }
+      else { const out = p.qty > 0 ? Math.round((p.cost * -o.qty) / p.qty) : 0; p.cost -= out; p.realized += (o.proceeds ?? o.amount) - out; }
       p.qty = Math.round((p.qty + o.qty) * 1e6) / 1e6;
     }
     map.set(k, p);
@@ -627,7 +644,7 @@ export function suggestions(s, today) {
       limitHit = true;
       const pea = mine.every(l => s.accounts.find(a => a.id === l.accountId)?.type === 'PEA');
       add(-2, `Forte hausse : ${pct(takeProfit)} au-dessus de sa moyenne 50 jours, avec ${euro(gainAll)} de plus-value : prendre une partie des bénéfices (vendre environ un tiers).`
-        + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposé à 30 %.'));
+        + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposable.'));
     }
     for (const l of mine) {
       const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);

@@ -63,13 +63,16 @@ const catIcon = name => ICONS.find(([re]) => re.test(name ?? ''))?.[1] ?? '💳'
 const opIcon = o => (o.transferId ? '🔁' : o.envelopeId || o.kind === 'invest' ? '📈' : o.kind === 'income' ? '💶' : o.kind === 'refund' ? '↩️' : catIcon(catName(o.categoryId)));
 const shortDate = d => new Date(d + 'T12:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 
+// a title bought or sold by hand moves no cash: its amount is shown in grey
+const titleAmount = o => (!o.amount && o.isin && !o.split ? `<span class="muted">${eur(o.cost ?? o.proceeds ?? 0)}</span>` : money(o.amount));
+
 function opItem(o) {
   const tags = [o.planned && 'à venir', o.autoPaid && 'payé à échéance', o.transferId && 'virement interne'].filter(Boolean);
   const editable = !o.transferId && !o.envelopeId && o.kind !== 'invest';
   const sub = [shortDate(o.date), accName(o.accountId), catName(o.categoryId)].filter(Boolean).map(esc).join(' · ');
   return `<div class="op${editable ? ` tap" data-act="edit" data-id="${o.id}` : ''}"><div class="av">${opIcon(o)}</div>`
     + `<div class="l">${esc(o.label || catName(o.categoryId) || B.KINDS[o.kind])}${tags.map(t => `<span class="tag">${t}</span>`).join('')}<div class="muted">${sub}</div></div>`
-    + `<div class="r">${money(o.amount)}${o.transferId ? `<div class="actions">${btn('unlink', o.transferId, 'Délier')}${btn('del', o.id, 'Suppr.', 'small danger')}</div>`
+    + `<div class="r">${titleAmount(o)}${o.transferId ? `<div class="actions">${btn('unlink', o.transferId, 'Délier')}${btn('del', o.id, 'Suppr.', 'small danger')}</div>`
       : !editable ? `<div class="actions">${btn('del', o.id, 'Suppr.', 'small danger')}</div>` : ''}</div></div>`;
 }
 
@@ -287,7 +290,8 @@ const views = {
   },
 
   ops() {
-    const list = S.ops.filter(o => B.monthOf(o.date) === view.month && (!view.account || o.accountId === view.account)).sort((a, b) => b.date.localeCompare(a.date));
+    const settled = new Set(S.ops.map(o => o.plannedId).filter(Boolean)); // a due item already paid is not listed twice
+    const list = S.ops.filter(o => B.monthOf(o.date) === view.month && (!view.account || o.accountId === view.account) && !settled.has(o.id)).sort((a, b) => b.date.localeCompare(a.date));
     const pairs = B.transferCandidates(S), days = [...new Set(list.map(o => o.date))];
     const inOut = list.filter(o => !o.planned).reduce((t, o) => (o.kind === 'income' ? [t[0] + o.amount, t[1]] : ['expense', 'refund'].includes(o.kind) ? [t[0], t[1] - o.amount] : t), [0, 0]);
     return monthBar()
@@ -369,7 +373,7 @@ const views = {
         + lines.filter(l => l.isin === isin).map(l => `<div class="row"><span>${esc(accTag(l.accountId))} · ${num(l.qty)} part(s) · revient ${eur(l.cost)}</span><span>${l.value == null ? 'non valorisé' : eur(l.value)}</span></div>`).join('')
         + ((r => (r ? `<div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(r)}</div>` : ''))(B.realizedGain(S, isin)))
         + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
-          + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : money(o.amount)}</div>`).join('') + '</details>' : ''))(
+          + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : titleAmount(o)}</div>`).join('') + '</details>' : ''))(
           S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
         + '<h2 style="margin-top:10px">Actualités</h2>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
@@ -440,7 +444,7 @@ const views = {
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
         + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" required></label></div>`
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
-        + `${empty('Le montant est retiré des espèces du courtier (cagnotte). Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
+        + `${empty('Les espèces ne bougent pas : recopiez-les dans la cagnotte. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       + (cash.length ? card(`💰 Ma cagnotte · ${eur(cash.reduce((n, x) => n + B.balance(S, x), 0))}`, `<form data-form="cash"><input type="hidden" name="date" value="${t}">`
         + byBank(cash).map(x => `<label>${esc(accTag(x.id))} <span class="muted">· espèces</span><input name="c_${esc(x.id)}" inputmode="decimal" value="${euros(B.balance(S, x))}"></label>`).join('')
         + `<button>Mettre à jour mes comptes</button>${empty('Recopiez les espèces affichées par chaque banque (dividendes compris). L’écart est enregistré dans Mouvements, hors budget du foyer.')}</form>`) : '')
@@ -555,7 +559,7 @@ const views = {
     return `<section class="hero"><div class="lbl">Patrimoine total</div><div class="big">${eur(now?.total ?? 0)}</div>`
         + (w.length > 1 ? `<div style="font-weight:700;font-size:16px">${chg >= 0 ? '▲ +' : '▼ −'}${eur(Math.abs(chg))}${start.total > 0 ? ` (${chg >= 0 ? '+' : '−'}${pct(Math.abs(chg), start.total)})` : ''} depuis ${monthName(start.month)}</div>` : '')
         + `<div class="stats"><div><small>Espèces</small>${eur(now?.cash ?? 0)}</div><div><small>Titres</small>${eur(now?.securities ?? 0)}</div><div><small>Épargne / mois</small>${eur(avgIn - avgOut)}</div></div></section>`
-      + card('📈 Évolution du patrimoine', line() + empty('Fin de chaque mois : espèces de tous les comptes + titres au cours de clôture de ce jour-là (au prix d’achat s’il manque).'))
+      + card('📈 Évolution du patrimoine (estimation)', line() + empty('Fin de chaque mois : espèces de tous les comptes + titres au cours de clôture de ce jour-là (au prix d’achat s’il manque).'))
       + card('💸 Revenus et dépenses', inOut()
         + row('Revenus moyens par mois', avgIn) + row('Dépenses moyennes par mois', avgOut)
         + `<div class="row"><span>Taux d’épargne</span><b class="${rate == null ? '' : rate >= 10 ? 'good' : rate >= 0 ? 'warn' : 'bad'}">${rate == null ? '—' : `${rate} %`}</b></div>`
