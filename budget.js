@@ -30,10 +30,6 @@ export function validateState(x) {
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
     x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {}; x.discovery ??= { date: null, items: {} };
     x.settings.lowSpendable ??= 10000; x.notified ??= { verdicts: {}, sent: [] }; x.journal ??= [];
-    // the hand-picked comparison ETFs were withdrawn (ideas now come from the market scan): drop those never bought
-    const withdrawn = ['Amundi MSCI World (CW8)', 'Amundi PEA S&P 500 (PSP5)', 'Amundi Stoxx Europe 600 (MEUD)', 'Amundi PEA MSCI Emerging Markets (PAEEM)'];
-    x.instruments = x.instruments.filter(i => !(i.type === 'ETF' && withdrawn.includes(i.name) && !x.ops.some(o => o.isin === i.isin)
-      && !Object.values(x.snapshots).some(sn => sn.lines.some(l => l.isin === i.isin))));
     // v27 own purchases took their amount from the broker's cash, typed by hand in the cagnotte: keep only the cost
     for (const o of x.ops ?? []) if (o.kind === 'invest' && o.isin && o.qty > 0 && o.amount < 0 && !o.envelopeId && !o.importKey && o.cost == null && /^Achat /.test(o.label ?? '')) {
       o.cost = -o.amount; o.amount = 0;
@@ -583,6 +579,15 @@ const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
 
 const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
 
+// Broad index funds, judged by the same rules as any idea. Added once: one you stop following stays gone.
+const ETF_CANDIDATES = [['LU1681043599', 'Amundi MSCI World (CW8)'], ['FR0011871128', 'Amundi PEA S&P 500 (PSP5)'],
+  ['LU0908500753', 'Amundi Stoxx Europe 600 (MEUD)'], ['FR0013412020', 'Amundi PEA MSCI Emerging Markets (PAEEM)']];
+export function seedEtfs(s) {
+  if (s.etfSeeded) return;
+  s.etfSeeded = true;
+  for (const [isin, name] of ETF_CANDIDATES) if (!s.instruments.some(i => i.isin === isin)) saveInstrument(s, { isin, name, currency: 'EUR', type: 'ETF' });
+}
+
 // The strategy in force, written from the profile: every decision of `suggestions` names one of these rules.
 export function strategyRules(s) {
   const p = s.settings.profile, r = RISK[p.risk], active = p.style === 'actif', targets = Object.values(p.targets).some(t => t > 0);
@@ -593,9 +598,9 @@ export function strategyRules(s) {
     { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : vendre la moitié.` },
     { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
     { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
-    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération.' },
+    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération.' },
     { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
-    { n: 9, title: 'Argent des achats', text: 'L’enveloppe du mois va au meilleur signal. Les autres signaux se partagent à parts égales les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés.' },
+    { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés.' },
   ];
 }
 
@@ -684,9 +689,16 @@ export function suggestions(s, today) {
     if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`, undefined, undefined, 3);
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
+    const buyAt = /\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`) ? 1.5 : 2;
     const action = notable.length ? 'À examiner'
-      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || score <= -2 ? 'Alléger' : score >= 2 && !overCap ? 'Renforcer' : 'Conserver')
-        : score >= 2 ? 'Acheter' : 'Attendre';
+      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || score <= -2 ? 'Alléger' : score >= buyAt && !overCap ? 'Renforcer' : 'Conserver')
+        : score >= buyAt ? 'Acheter' : 'Attendre';
+    // everything the verdict merged, in one sentence
+    const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
+    const facts = [!tr ? 'tendance inconnue' : q.price >= tr.sma50 ? 'tendance haussière' : 'tendance baissière',
+      notable.length ? 'actualité importante à lire' : toneAvg != null ? `actualités ${toneAvg > 0.2 ? 'positives' : toneAvg < -0.2 ? 'négatives' : 'neutres'}` : recent.length ? `${recent.length} actualité(s) sans ton mesuré` : 'pas d’actualité récente',
+      cuts.some(c => c.rule === 4 || c.rule === 5) ? 'limite de risque atteinte' : cuts.some(c => c.rule === 6) ? 'forte hausse à encaisser' : isHeld ? 'risque dans vos limites' : null,
+      overCap ? 'ligne au-delà de votre limite' : alloc && t > 0 ? (alloc.pts > 0 ? 'sous sa part visée' : alloc.pts < 0 ? 'au-dessus de sa part visée' : 'à sa part visée') : null].filter(Boolean).join(', ');
     // the conclusion's frame: what it still lacks, what would overturn it, and how much data stands behind it
     const ind = indicators(s, i.isin), level = ind?.sma200 ?? ind?.sma50, two = v => v.toFixed(2).replace('.', ',');
     const missing = [!ind?.sma200 && 'Moins d’un an de cours : moyenne 200 jours indisponible.', !recent.length && 'Aucune actualité récente analysée.',
@@ -701,7 +713,7 @@ export function suggestions(s, today) {
     if (action === 'Vendre' || action === 'Alléger') {
       if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
       // the strongest rule triggered sets the size; a signal alone sells a third
-      const cut = action === 'Vendre' ? { rule: worst, share: 1, ls: own } : [...cuts].sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
+      const cut = action === 'Vendre' ? { rule: 7, share: 1, ls: own } : [...cuts].sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
       const sells = cut.ls.map(l => {
         const a = s.accounts.find(x => x.id === l.accountId), x = l.qty * cut.share;
         const qty = cut.share === 1 ? l.qty : Math.min(l.qty, a?.fractional || !Number.isInteger(l.qty) ? Math.floor(x * 1000) / 1000 : Math.ceil(x - 1e-9));
@@ -710,7 +722,7 @@ export function suggestions(s, today) {
       order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule,
         text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
     }
-    return { ...base, action, score, missing, invalidation, confidence, order };
+    return { ...base, action, score, missing, invalidation, confidence, order, facts };
   });
 
   // this month's envelope goes to the strongest buy signal, within the remaining amount and the broker's cash
@@ -737,25 +749,31 @@ export function suggestions(s, today) {
       const room = p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
       const pool = env ? (known ? Math.min(left, spare[a.id]) : left) : known ? Math.floor(spare[a.id] / (signals.length - k)) : 0;
       const aim = p.targets[i.isin] ?? 0, toTarget = !env && aim > 0 && aim < 100 && total ? Math.max(0, Math.round(((aim * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - aim / 100))) : Infinity; // new money also grows the total
-      const limit = Math.max(0, Math.min(pool, room, toTarget));
+      const titles = Object.keys(byIsin).length, sized = env ? Infinity : toTarget < Infinity ? toTarget : line ? Math.round((byIsin[i.isin] ?? 0) / 3) : titles ? Math.round(total / titles / 3) : Infinity;
+      const limit = Math.max(0, Math.min(pool, room, sized)), wanted = Math.min(room, sized);
+      // what the rule asks for, whatever the cash: shown even when the money is not there yet
+      const wantQty = wanted === Infinity || wanted <= 0 ? 0 : a.fractional ? Math.max(0, Math.floor(((wanted - fixed) / raw) * 1000) / 1000) : Math.max(room >= unit ? 1 : 0, Math.floor((wanted - fixed) / unit));
       const qty = a.fractional ? Math.max(0, Math.floor(((limit - fixed) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - fixed) / unit));
       const spend = qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + fixed : 0;
-      return { a, limit, qty, unit, total: spend, known, fees: qty ? spend - Math.round((qty * price * 100) / rate) : 0,
+      return { a, limit, qty, unit, total: spend, known, wantQty, wantTotal: wantQty ? (a.fractional ? Math.round(wantQty * raw) : wantQty * unit) + fixed : 0, fees: qty ? spend - Math.round((qty * price * 100) / rate) : 0,
         where: !env ? `espèces de ${a.name}, part de ce signal` : !known ? 'reliquat de l’enveloppe, encaisse inconnue' : cash < left ? `limité par l’encaisse ${a.name}` : 'reliquat de l’enveloppe' };
     };
     const plans = accounts.map(plan);
     // a PEA wins when it can buy (less tax after 5 years); otherwise the account buying the most, then the cheapest
     const best = [...plans].sort((x, y) => (y.qty > 0) - (x.qty > 0) || (y.a.type === 'PEA') - (x.a.type === 'PEA') || y.total - x.total || x.fees - y.fees)[0];
+    const verb = q => `${line ? 'Renforcer de' : 'Acheter'} ${parts(q)}`;
     if (!best) {
       pick.reasons.push({ pts: 0, rule: 9, text: `${src} : aucun compte titres ne peut recevoir ce titre (le PEA est réservé aux titres européens).` });
       pick.order = { side: 'achat', qty: 0, rule: 9, text: 'Aucun achat possible : aucun de vos comptes ne peut recevoir ce titre.' };
     } else if (!best.qty) {
       pick.reasons.push({ pts: 0, rule: 9, text: `${src} : ${euro(best.limit)} disponibles (${best.where}), insuffisant pour une part (${euro(best.unit)}) et les frais. Un compte acceptant les fractions de parts le permettrait.` });
-      pick.order = { side: 'achat', qty: 0, rule: 9, text: best.known || env ? `Aucun achat possible : ${euro(best.limit)} disponibles sur ${best.a.name}, moins qu’une part (${euro(best.unit)}) et ses frais.`
-        : `Montant inconnu : indiquez les espèces de ${best.a.name} dans Accueil.` };
+      pick.order = best.wantQty
+        ? { side: 'achat', qty: best.wantQty, amount: best.wantTotal, accountId: best.a.id, rule, funded: false, text: `${verb(best.wantQty)} sur ${best.a.name} (≈ ${euro(best.wantTotal)}, frais inclus) : `
+          + (best.known ? `il manque ${euro(best.wantTotal - spare[best.a.id])} d’espèces` : `indiquez d’abord les espèces de ${best.a.name} dans Accueil`) }
+        : { side: 'achat', qty: 0, rule: 9, text: `Aucun achat possible : ${euro(best.limit)} disponibles sur ${best.a.name}, moins qu’une part (${euro(best.unit)}) et ses frais, ou part visée déjà atteinte.` };
     } else {
       spare[best.a.id] -= best.total;
-      pick.order = { side: 'achat', qty: best.qty, amount: best.total, accountId: best.a.id, rule, text: `Acheter ${parts(best.qty)} sur ${best.a.name} (≈ ${euro(best.total)}, frais inclus)` };
+      pick.order = { side: 'achat', qty: best.qty, amount: best.total, accountId: best.a.id, rule, funded: true, text: `${verb(best.qty)} sur ${best.a.name} (≈ ${euro(best.total)}, frais inclus)` };
       pick.buy = { qty: best.qty, total: best.total, fees: best.fees, limit: best.limit, accountId: best.a.id };
       pick.reasons.push({ pts: 0, rule: 9, text: `${src} : ${parts(best.qty)} sur ${best.a.name}${best.a.type === 'PEA' ? ' (PEA : moins d’impôts après 5 ans)' : ''}`
         + ` pour environ ${euro(best.total)}, dont ${euro(best.fees)} de frais (${best.where} : ${euro(best.limit)}).` });

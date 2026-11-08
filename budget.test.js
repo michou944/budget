@@ -875,7 +875,7 @@ test('Order: every sale says how many, on which account and under which rule', (
   B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
   B.setHistory(s, ETF, closes(70, -0.3), 'test', T); // and falling: everything goes
   const v = verdict(s, ETF);
-  assert.equal(v.action, 'Vendre'); assert.equal(v.order.qty, 10); assert.equal(v.order.rule, 4);
+  assert.equal(v.action, 'Vendre'); assert.equal(v.order.qty, 10); assert.equal(v.order.rule, 7); // the rule that says « tout vendre »
 });
 
 test('Order: back to the target share, the sale being the excess only', () => {
@@ -891,7 +891,7 @@ test('Order: buy signals share the broker cash without an envelope, up to the ta
   assert.equal(v.action, 'Acheter'); assert.equal(v.order.side, 'achat'); assert.equal(v.order.qty, 1); assert.equal(v.buy.accountId, 'b');
   assert.match(v.order.text, /Acheter 1 part sur Fortuneo/);
   s.accounts[1].opening = 0;
-  assert.match(verdict(s, CW8).order.text, /Montant inconnu|Aucun achat possible/);
+  assert.match(verdict(s, CW8).order.text, /Acheter 1 part sur Fortuneo .*indiquez d’abord les espèces/); // still a figure without cash
 });
 
 test('Order: a limit per line no longer crashes the purchase sizing', () => {
@@ -918,4 +918,29 @@ test('News: only recent articles are asked for, the tone is the company own, bro
   assert.equal(B.newsQuery({ name: 'SONY FINANCIAL GR UNSPON ADS EACH REP 5 ORD' }), 'SONY FINANCIAL');
   assert.equal(B.newsQuery({ name: 'SONY ADR' }), 'SONY');
   assert.equal(B.newsQuery({ name: 'AMUNDI PEA MONDE (MSCI World) UCITS ETF - Acc EUR ACC' }), 'MSCI World');
+});
+
+test('Order: reinforcing always says how much, a third of the line without a target, with what is missing', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 30, 300000);
+  B.setHistory(s, ETF, closes(120, 0.1), 'test', T);
+  s.news.push(...['a', 'b'].map(u => ({ isin: ETF, title: 'x', url: `https://e.com/${u}`, source: 'e', publishedAt: T, sentiment: 0.6 })));
+  s.accounts.find(a => a.id === 'b').opening = 200000;
+  let v = verdict(s, ETF);
+  assert.equal(v.action, 'Renforcer'); assert.match(v.order.text, /^Renforcer de 9 parts sur Fortuneo/); assert.equal(v.order.funded, true); // third of 3 600 € = 1 200 €, fees within
+  assert.match(v.facts, /tendance haussière, actualités positives, risque dans vos limites/);
+  s.accounts.find(a => a.id === 'b').opening = 100;
+  v = verdict(s, ETF);
+  assert.match(v.order.text, /^Renforcer de 9 parts .*il manque/); assert.equal(v.order.funded, false); assert.equal(v.buy, undefined);
+});
+
+test('ETF candidates: added once, a removed one stays gone, bought at a lower score than a stock', () => {
+  const s = base(); B.seedEtfs(s);
+  assert.equal(s.instruments.length, 4); assert.ok(s.instruments.every(i => i.type === 'ETF'));
+  B.deleteInstrument(s, s.instruments[0].isin); B.seedEtfs(s);
+  assert.equal(s.instruments.length, 3);
+  assert.equal(B.validateState(JSON.parse(JSON.stringify(s))).instruments.length, 3); // loading keeps them
+  const isin = s.instruments[0].isin;
+  B.setHistory(s, isin, closes(120, 0.1), 'test', T); // rising: +1 and +0,5
+  assert.equal(verdict(s, isin).action, 'Acheter');
 });

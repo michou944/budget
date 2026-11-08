@@ -337,7 +337,7 @@ const views = {
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accTag(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
-        + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.qty ? 'good' : 'muted'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
+        + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.funded ? 'good' : 'warn'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
@@ -349,7 +349,7 @@ const views = {
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
         priceChart(isin, i.currency)
         + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
-        + ((r => `<div class="day">👉 Que faire</div><div><b>${esc(x.order.text)}</b></div>${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
+        + ((r => `<div class="day">🎯 Conclusion</div><div><b>${esc(x.order.text)}</b></div>${x.facts ? `<div>Bilan : ${esc(x.facts)}.</div>` : ''}${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
         + [['👍 Pour', r => r.pts > 0], ['👎 Contre', r => r.pts < 0], ['ℹ️ À savoir', r => !r.pts]].map(([t, keep]) => {
           const rs = x.reasons.filter(keep);
           return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}${r.rule ? ` <span class="tag">Règle ${r.rule}</span>` : ''}</span></div>`).join('') : '';
@@ -427,6 +427,12 @@ const views = {
         + (!ready ? empty('Ouvrez « Réglages bourse » en bas de page : 5 minutes de configuration, une seule fois.') : '')
         + (view.refreshing ? empty('⏳ Actualisation des cours, actualités et avis…') : lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
         + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '')
+      + ((todo, odd, gone) => card('🎯 Conclusion du jour', (todo.length || odd.length ? [...todo, ...odd].map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}<div class="${x.order.side === 'vente' ? 'bad' : x.order.side === 'achat' && !x.order.funded ? 'warn' : x.order.side ? 'good' : 'muted'}"><b>${esc(x.order.text)}</b></div><div class="muted">${esc(x.facts ?? '')}</div></div></div>`).join('')
+          : empty(lines.length ? 'Aucune opération aujourd’hui : vos règles ne déclenchent ni achat ni vente.' : 'Aucune opération proposée pour l’instant.'))
+        + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente').reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat').reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
+        + (gone ? `<div class="warn">${gone} titre(s) sans conclusion : cours manquant ou périmé.</div>` : '')
+        + empty(`Calcul fusionnant cours, tendance, actualités, vos limites et vos parts visées. Les résultats des sociétés ne sont pas analysés. ${B.DISCLAIMER}`)))(
+        [...sug.filter(x => x.order?.side === 'vente'), ...sug.filter(x => x.order?.side === 'achat' && x.order.qty)], sug.filter(x => x.action === 'À examiner'), sug.filter(x => x.suspended && x.held).length)
       + fold('strategy', `🧭 Ma stratégie · ${esc(B.RISK[pf.risk].label)} · ${pf.horizon} ans · ${pf.style === 'actif' ? 'actif' : 'long terme'}`,
         B.strategyRules(S).map(r => `<div class="row"><span><b>${r.n}. ${esc(r.title)}</b><div class="muted">${esc(r.text)}</div></span></div>`).join('')
         + empty(`Chaque avis cite la règle qui l’a décidé. Ces règles viennent de « Mon profil et mes cibles », dans Autres options. ${B.DISCLAIMER}`))
@@ -673,6 +679,7 @@ const actions = {
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
   refreshAll: async () => {
+    B.seedEtfs(S);
     const t = today(), errs = [...await refreshMarket(S, t)];
     if (newsOn(S.settings.market)) {
       errs.push(...await refreshNews(S, t));
