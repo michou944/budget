@@ -753,27 +753,17 @@ test('Cagnotte: the cash typed from the bank becomes the account balance, outsid
   assert.throws(() => B.setCash(s, 'nope', T, 0));
 });
 
-test('Own purchase: new ISIN followed, position on the chosen broker, cash untouched, outside the household budget', () => {
+test('Own purchase: new ISIN followed, position on the chosen broker, cash reduced, outside the household budget', () => {
   const s = B.demoState(T), a = s.accounts.at(-1), cash = B.balance(s, a), m = B.monthStats(s, T.slice(0, 7));
   const id = B.addPurchase(s, { accountId: a.id, isin: ' nl0010273215 ', name: 'ASML', date: T, qty: 2, cents: 40000 });
   assert.equal(id, 'NL0010273215'); assert.equal(s.instruments.find(i => i.isin === id).name, 'ASML');
   assert.deepEqual(B.positions(s).find(p => p.isin === id), { accountId: a.id, isin: id, qty: 2, cost: 40000 });
-  assert.equal(B.balance(s, a), cash); // the cash is typed by hand in the cagnotte
+  assert.equal(B.balance(s, a), cash - 40000);
   B.addPurchase(s, { accountId: a.id, isin: id, date: T, qty: 1, cents: 21000 }); // known title: no name needed
   assert.equal(B.positions(s).find(p => p.isin === id).qty, 3);
   assert.equal(B.monthStats(s, T.slice(0, 7)).spent, m.spent);
   assert.throws(() => B.addPurchase(s, { accountId: a.id, isin: 'XX123', date: T, qty: 1, cents: 100 }), /ISIN/);
   assert.throws(() => B.addPurchase(s, { accountId: a.id, isin: id, date: T, qty: 0, cents: 100 }));
-});
-
-test('Own purchases saved by v27 give their amount back to the cash, cost kept', () => {
-  const s = B.demoState(T), a = s.accounts.at(-1), cash = B.balance(s, a);
-  s.ops.push({ id: 'p', accountId: a.id, date: T, amount: -40000, kind: 'invest', isin: 'NL0010273215', qty: 2, label: 'Achat ASML', seq: 99 });
-  s.instruments.push({ isin: 'NL0010273215', name: 'ASML', symbol: '', place: '', currency: 'EUR', type: '' });
-  const n = B.validateState(JSON.parse(JSON.stringify(s)));
-  assert.equal(B.balance(n, n.accounts.at(-1)), cash);
-  assert.equal(B.positions(n).find(p => p.isin === 'NL0010273215').cost, 40000);
-  assert.ok(n.ops.filter(o => o.envelopeId).every(o => o.amount < 0)); // envelope buys untouched
 });
 
 test('Account total: a title without price yet counts at its cost', () => {
@@ -857,11 +847,13 @@ test('Due items: deleting the payment brings the due item back, without double c
   assert.equal(B.balance(s, s.accounts[0]), 91629); assert.equal(s.ops[0].autoPaid, true);
 });
 
-test('Hand-entered purchase leaves the cash alone, the sale lands in it, gain counted', () => {
+test('Hand-entered purchase takes from the cash, the sale lands in it, a declared holding moves nothing', () => {
   const s = withInstruments(), b = s.accounts.find(a => a.id === 'b'), cash = B.balance(s, b);
   B.addPurchase(s, { accountId: 'b', isin: ETF, date: '2026-01-01', qty: 2, cents: 10000 });
   B.addSale(s, 'b', ETF, '2026-02-01', 2, 12000);
-  assert.equal(B.balance(s, b), cash + 12000); assert.equal(B.realizedGain(s, ETF), 2000);
+  assert.equal(B.balance(s, b), cash + 2000); assert.equal(B.realizedGain(s, ETF), 2000);
+  B.addHolding(s, 'b', ETF, '2026-03-01', 1, 5000); assert.equal(B.balance(s, b), cash + 2000);
+  assert.equal(B.balance(B.validateState(JSON.parse(JSON.stringify(s))), b), cash + 2000); // a reload changes nothing
 });
 
 test('Order: every sale says how many, on which account and under which rule', () => {

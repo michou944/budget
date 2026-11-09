@@ -63,7 +63,7 @@ const catIcon = name => ICONS.find(([re]) => re.test(name ?? ''))?.[1] ?? '💳'
 const opIcon = o => (o.transferId ? '🔁' : o.envelopeId || o.kind === 'invest' ? '📈' : o.kind === 'income' ? '💶' : o.kind === 'refund' ? '↩️' : catIcon(catName(o.categoryId)));
 const shortDate = d => new Date(d + 'T12:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 
-// a title bought by hand moves no cash: its amount is shown in grey
+// a holding declared by hand moves no cash: its amount is shown in grey
 const titleAmount = o => (!o.amount && o.isin && !o.split ? `<span class="muted">${eur(o.cost ?? 0)}</span>` : money(o.amount));
 
 function opItem(o) {
@@ -451,7 +451,7 @@ const views = {
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
         + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" required></label></div>`
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
-        + `${empty('Les espèces ne bougent pas : mettez-les à jour dans Accueil, sur le compte. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
+        + `${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans Autres options. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       + `<details class="card fold" data-fold="more"${!ready || sr0 || view.trades || view.snap || view.open.has('more') ? ' open' : ''}><summary>⚙️ Autres options</summary>`
       + (view.search?.forIsin ? '' : searchCard())
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
