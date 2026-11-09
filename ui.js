@@ -63,8 +63,8 @@ const catIcon = name => ICONS.find(([re]) => re.test(name ?? ''))?.[1] ?? '💳'
 const opIcon = o => (o.transferId ? '🔁' : o.envelopeId || o.kind === 'invest' ? '📈' : o.kind === 'income' ? '💶' : o.kind === 'refund' ? '↩️' : catIcon(catName(o.categoryId)));
 const shortDate = d => new Date(d + 'T12:00').toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 
-// a title bought or sold by hand moves no cash: its amount is shown in grey
-const titleAmount = o => (!o.amount && o.isin && !o.split ? `<span class="muted">${eur(o.cost ?? o.proceeds ?? 0)}</span>` : money(o.amount));
+// a title bought by hand moves no cash: its amount is shown in grey
+const titleAmount = o => (!o.amount && o.isin && !o.split ? `<span class="muted">${eur(o.cost ?? 0)}</span>` : money(o.amount));
 
 function opItem(o) {
   const tags = [o.planned && 'à venir', o.autoPaid && 'payé à échéance', o.transferId && 'virement interne'].filter(Boolean);

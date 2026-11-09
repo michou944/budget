@@ -857,11 +857,11 @@ test('Due items: deleting the payment brings the due item back, without double c
   assert.equal(B.balance(s, s.accounts[0]), 91629); assert.equal(s.ops[0].autoPaid, true);
 });
 
-test('Hand-entered purchase and sale leave the cash alone, gain still counted', () => {
+test('Hand-entered purchase leaves the cash alone, the sale lands in it, gain counted', () => {
   const s = withInstruments(), b = s.accounts.find(a => a.id === 'b'), cash = B.balance(s, b);
   B.addPurchase(s, { accountId: 'b', isin: ETF, date: '2026-01-01', qty: 2, cents: 10000 });
   B.addSale(s, 'b', ETF, '2026-02-01', 2, 12000);
-  assert.equal(B.balance(s, b), cash); assert.equal(B.realizedGain(s, ETF), 2000);
+  assert.equal(B.balance(s, b), cash + 12000); assert.equal(B.realizedGain(s, ETF), 2000);
 });
 
 test('Order: every sale says how many, on which account and under which rule', () => {
@@ -943,4 +943,24 @@ test('ETF candidates: added once, a removed one stays gone, bought at a lower sc
   const isin = s.instruments[0].isin;
   B.setHistory(s, isin, closes(120, 0.1), 'test', T); // rising: +1 and +0,5
   assert.equal(verdict(s, isin).action, 'Acheter');
+});
+
+test('Sales saved without cash by v32-v35 reach it on load, once', () => {
+  const s = withInstruments(), cash = B.balance(s, s.accounts.find(a => a.id === 'b'));
+  s.ops.push({ id: 'v', accountId: 'b', date: T, amount: 0, proceeds: 5000, kind: 'invest', isin: ETF, qty: -1, label: 'Vente' });
+  const once = B.validateState(JSON.parse(JSON.stringify(s))), twice = B.validateState(JSON.parse(JSON.stringify(once)));
+  assert.equal(B.balance(twice, twice.accounts.find(a => a.id === 'b')), cash + 5000);
+});
+
+test('After a partial sale the same rule waits 30 days instead of selling part of the rest', () => {
+  const s = withInstruments();
+  B.addHolding(s, 'b', ETF, '2025-01-01', 38, 380000);
+  B.setHistory(s, ETF, closes(70, 0), 'test', T); // 30 % lost: maximum loss, sell half
+  assert.equal(verdict(s, ETF).order.qty, 19);
+  B.addSale(s, 'b', ETF, T, 19, 133000);
+  let v = verdict(s, ETF);
+  assert.equal(v.action, 'Conserver'); assert.equal(v.order.side, null); assert.equal(v.order.rule, 10);
+  s.ops.find(o => o.qty === -19).date = dateBack(31); // the pause is over
+  v = verdict(s, ETF);
+  assert.equal(v.action, 'Alléger'); assert.equal(v.order.qty, 10);
 });
