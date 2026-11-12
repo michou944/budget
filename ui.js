@@ -88,8 +88,7 @@ const accKind = a => (a.type === 'PEA' ? 'pea' : a.type === 'CTO' ? 'cto' : a.sa
 const ACC_TYPES = { courant: ['🏦', 'Compte courant'], livretA: ['🐷', 'Livret A'], ldds: ['🐷', 'LDDS'], lep: ['🐷', 'LEP'], cel: ['🐷', 'CEL'], pel: ['🐷', 'PEL'],
   av: ['🛡️', 'Assurance-vie'], epargne: ['🐷', 'Autre épargne'], pea: ['📈', 'PEA'], cto: ['📈', 'Compte-titres (CTO)'] };
 // accounts made before the types: guessed from their name until edited
-const guessSub = n => [[/livret ?a\b/i, 'livretA'], [/ldds|ldd\b/i, 'ldds'], [/\blep\b/i, 'lep'], [/\bcel\b/i, 'cel'], [/\bpel\b/i, 'pel'], [/assurance|\bav\b/i, 'av']].find(([r]) => r.test(n))?.[1];
-const accType = a => (a.savings ? (ACC_TYPES[a.sub] ? a.sub : guessSub(a.name) ?? 'epargne') : accKind(a));
+const accType = a => (a.savings ? (ACC_TYPES[a.sub] ? a.sub : B.guessSub(a.name) ?? 'epargne') : accKind(a));
 // « Fortuneo · PEA »: the name, plus the envelope when the name does not say it
 const accTag = id => { const a = S.accounts.find(x => x.id === id); if (!a) return '?'; const k = accKind(a), t = k === 'pea' ? 'PEA' : k === 'cto' ? 'CTO' : '';
   return t && !a.name.toUpperCase().includes(t) ? `${a.name} · ${t}` : a.name; };

@@ -1006,3 +1006,30 @@ test('Checks: what makes the figures wrong, and the five years of the PEA', () =
   assert.equal(B.peaFiveYears(s.accounts.find(a => a.id === 'p')), '2028-03-12');
   assert.doesNotMatch(B.checks(s, T).join('\n'), /date d’ouverture/);
 });
+
+test('Import: a payment gets the category given last time to the same shop', () => {
+  const s = base(), food = s.categories[0].id;
+  B.saveOp(s, { accountId: 'a', date: '2026-10-02', kind: 'expense', cents: 4000, label: 'CB CARREFOUR 02/10 PARIS', categoryId: food });
+  const rows = [{ date: '2026-11-02', amount: -5230, label: 'CB CARREFOUR MARKET 02/11' }, { date: '2026-11-03', amount: -900, label: 'CB BOULANGERIE 03/11' }];
+  B.importRows(s, 'a', B.importPreview(s, 'a', rows), '2026-11-03');
+  assert.equal(s.ops.find(o => /MARKET/.test(o.label)).categoryId, food);
+  assert.equal(s.ops.find(o => /BOULANGERIE/.test(o.label)).categoryId, null);
+});
+
+test('Notifications: an advice to confirm is announced only once confirmed', () => {
+  const s = p03(500000);
+  s.settings.notify = true;
+  assert.ok(!B.pendingNotifications(s, T).some(x => x.name === 'CW8')); // to confirm: nothing yet
+  B.markNotified(s, [], T); B.logVerdicts(s, T);
+  s.signalSince[CW8].date = dateBack(1);
+  assert.ok(B.pendingNotifications(s, T).some(x => x.name === 'CW8' && /^Acheter/.test(x.body)));
+});
+
+test('Checks: savings near their ceiling, with the room left elsewhere', () => {
+  const s = base();
+  s.accounts.find(a => a.id === 'l').opening = 2200000; // « Livret » named: an other savings account, no ceiling
+  s.accounts.push({ id: 'la', name: 'Livret A', institution: 'BCP', opening: 2200000, savings: true }, { id: 'dd', name: 'LDDS', institution: 'BCP', opening: 200000, savings: true });
+  const c = B.checks(s, T).join('\n');
+  assert.match(c, /Livret A : 22 ?000,00 € sur 22 ?950,00 € de plafond\. Place restante : LDDS \(10 ?000,00 €\)/);
+  assert.doesNotMatch(c, /LDDS : /);
+});

@@ -113,6 +113,18 @@ export function staleAccounts(s, today, maxDays = 30) {
     .filter(x => !x.last || dayNum(today) - dayNum(x.last) > maxDays);
 }
 
+export const guessSub = n => [[/livret ?a\b/i, 'livretA'], [/ldds|ldd\b/i, 'ldds'], [/\blep\b/i, 'lep'], [/\bcel\b/i, 'cel'], [/\bpel\b/i, 'pel'], [/assurance|\bav\b/i, 'av']].find(([r]) => r.test(n))?.[1];
+// shortcut: ceilings of 2026 (deposits, interest may go above), to update if the law changes
+const CEILINGS = { livretA: ['Livret A', 2295000], ldds: ['LDDS', 1200000], lep: ['LEP', 1000000], cel: ['CEL', 1530000], pel: ['PEL', 6120000] }, PEA_CEILING = 15000000;
+
+// The category given last time to a payment whose label starts with the same word (« CB CARREFOUR … »): imports learn from you.
+export function guessCategory(s, label) {
+  const k = labelWords(label)[0];
+  if (!k) return null;
+  return s.ops.filter(o => o.categoryId && !o.planned && labelWords(o.label)[0] === k && s.categories.some(c => c.id === o.categoryId))
+    .sort((a, b) => a.date.localeCompare(b.date)).at(-1)?.categoryId ?? null;
+}
+
 // PEA: five years after its opening date, withdrawals no longer close it (YYYY-MM-DD, or null without a date).
 export const peaFiveYears = a => (a.opened ? `${+a.opened.slice(0, 4) + 5}${a.opened.slice(4)}` : null);
 
@@ -124,6 +136,16 @@ export function checks(s, today) {
   for (const l of valuation(s, today)) {
     if (l.value == null) out.push(`${l.inst.name} (${name(l.accountId)}) : compté au prix d’achat, cours absent ou à vérifier.`);
     else if (l.stale && !late.has(l.isin)) { late.add(l.isin); out.push(`${l.inst.name} : cours du ${l.quote?.asOf ?? '?'}, pas à jour.`); }
+  }
+  // ceilings: savings by their balance, the PEA by what was put in (cash + cost of its titles, roughly)
+  const lines = valuation(s, today), caps = s.accounts.map(a => {
+    const c = a.savings && CEILINGS[a.sub ?? guessSub(a.name)], pea = a.type === 'PEA';
+    return c || pea ? { a, cap: c ? c[1] : PEA_CEILING, used: balance(s, a) + (pea ? sum(lines.filter(l => l.accountId === a.id), l => l.cost) : 0), pea } : null;
+  }).filter(Boolean);
+  const room = caps.filter(x => x.used < x.cap * 0.9);
+  for (const x of caps.filter(y => y.used >= y.cap * 0.9)) {
+    out.push(`${x.a.name} : ${x.pea ? 'environ ' : ''}${euro(x.used)} sur ${euro(x.cap)} de plafond${x.pea ? ' de versements' : ''}.`
+      + (room.length ? ` Place restante : ${room.map(y => `${y.a.name} (${euro(y.cap - y.used)})`).join(', ')}.` : ''));
   }
   for (const a of s.accounts) if (a.type === 'PEA' && !a.opened) out.push(`${a.name} : indiquez sa date d’ouverture pour suivre les 5 ans du PEA.`);
   // a savings or brokerage account can rest for months: only current accounts are expected to move
@@ -860,7 +882,7 @@ export function pendingNotifications(s, today) {
   const n = (s.notified ??= { verdicts: {}, sent: [] }), m = monthOf(today), out = [];
   // a verdict is announced when it changes to something to act on
   for (const x of suggestions(s, today)) {
-    if (x.suspended || !ACTIONABLE.includes(x.action) || n.verdicts[x.isin] === x.action) continue;
+    if (x.suspended || x.order?.pending || !ACTIONABLE.includes(x.action) || n.verdicts[x.isin] === x.action) continue;
     const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
     out.push({ id: `v|${x.isin}|${x.action}`, kind: 'verdict', action: x.action, name: x.name, title: `${x.action} : ${x.name}`,
       body: (x.order?.qty ? `${x.order.text}. ` : '') + (main?.text ?? '') });
@@ -882,7 +904,7 @@ export function pendingNotifications(s, today) {
 
 // Remembers what was announced: current verdicts, and the one-off alerts sent.
 export function markNotified(s, sent, today) {
-  for (const x of suggestions(s, today)) if (!x.suspended) s.notified.verdicts[x.isin] = x.action;
+  for (const x of suggestions(s, today)) if (!x.suspended && !x.order?.pending) s.notified.verdicts[x.isin] = x.action;
   s.notified.sent = [...s.notified.sent, ...sent.filter(x => x.once).map(x => x.id)].slice(-200);
 }
 
@@ -941,7 +963,7 @@ export function importPreview(s, accountId, rows) {
 export function importRows(s, accountId, preview, today) {
   const kept = preview.filter(r => r.keep);
   for (const r of kept) {
-    const o = { id: uid(), accountId, date: r.date, amount: r.amount, kind: r.amount < 0 ? 'expense' : 'income', categoryId: null, label: r.label, importKey: r.importKey };
+    const o = { id: uid(), accountId, date: r.date, amount: r.amount, kind: r.amount < 0 ? 'expense' : 'income', categoryId: guessCategory(s, r.label), label: r.label, importKey: r.importKey };
     s.ops.push(o); autoMatch(s, o);
   }
   s.lastImport = { date: today, accountId, count: kept.length };
@@ -1067,7 +1089,7 @@ export function importTrades(s, accountId, preview, today) {
   const kept = preview.filter(r => r.keep);
   for (const r of kept) {
     if (!r.isin) { // broker cash movement (dividend, interest, deposit) or card payment
-      s.ops.push({ id: uid(), accountId, date: r.date, amount: r.amount, kind: r.kind, categoryId: null, label: r.label, importKey: r.importKey });
+      s.ops.push({ id: uid(), accountId, date: r.date, amount: r.amount, kind: r.kind, categoryId: r.kind === 'expense' ? guessCategory(s, r.label) : null, label: r.label, importKey: r.importKey });
       continue;
     }
     if (!s.instruments.some(i => i.isin === r.isin)) saveInstrument(s, { isin: r.isin, name: r.name, currency: r.currency });
