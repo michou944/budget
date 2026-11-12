@@ -335,7 +335,7 @@ const views = {
     const envs = S.envelopes.filter(e => e.month === view.month), open = envs.filter(e => B.envelopeLeft(S, e) > 0);
     const left = envs.reduce((a, e) => a + B.envelopeLeft(S, e), 0);
     const brokers = S.accounts.filter(a => S.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
-    const total = ls => ls.reduce((a, l) => a + (l.value ?? 0), 0), missing = lines.filter(l => l.value == null).length;
+    const total = ls => ls.reduce((a, l) => a + (l.value ?? l.cost), 0), missing = lines.filter(l => l.value == null).length;
     const inst = isin => S.instruments.find(i => i.isin === isin), sr0 = view.search && !view.search.forIsin;
     const cash = S.accounts.filter(a => ['cto', 'pea'].includes(accKind(a)) || brokers.includes(a));
     const quoteInfo = (q, i) => (q ? `${num(q.price)} ${i.currency} · ${q.asOf} · ${esc(q.source)}` : 'cours indisponible');
@@ -446,7 +446,7 @@ const views = {
 
     // one screen per need instead of one long page; some actions bring their own tab forward
     const todoN = sug.filter(x => (x.order?.side && x.order.qty) || x.action === 'À examiner').length;
-    const tab = view.trades || view.snap ? 'more' : sr0 ? 'ideas' : view.prefill ? 'titles' : view.stockTab ?? (ready || lines.length ? 'today' : 'more');
+    const tab = view.trades || view.snap ? 'more' : sr0 ? 'ideas' : view.stockTab ?? (ready || lines.length ? 'today' : 'more');
     if (view.inst) return (view.search?.forIsin ? searchCard() : '') + sheet(view.inst);
     return (view.search?.forIsin ? searchCard() : '')
       + `<div class="seg" style="margin-bottom:12px">${[['today', `À faire${todoN ? ` · ${todoN}` : ''}`], ['titles', 'Titres'], ['ideas', 'Idées'], ['more', 'Plus']]
@@ -456,7 +456,7 @@ const views = {
         const valued = lines.filter(l => l.value != null), gainAll = valued.reduce((a, l) => a + l.gain, 0), costAll = valued.reduce((a, l) => a + l.cost, 0);
         return `<section class="hero"><div class="lbl">Mon portefeuille</div><div class="big">${eur(total(lines))}</div>`
           + `<div style="font-weight:700;font-size:16px">${gainAll >= 0 ? '▲ +' : '▼ −'}${eur(Math.abs(gainAll))}${costAll ? ` (${gainAll >= 0 ? '+' : '−'}${Math.abs((gainAll * 100) / costAll).toFixed(1).replace('.', ',')} %)` : ''}</div>`
-          + `<div class="stats"><div><small>Positions</small>${held.length}</div><div><small>Avis à suivre</small>${held.filter(x => ['Renforcer', 'Alléger', 'Vendre', 'À examiner'].includes(x.action)).length}</div><div><small>Idées</small>${sug.filter(x => !x.held && x.action === 'Acheter').length}</div></div></section>`;
+          + `<div class="stats"><div><small>Positions</small>${held.length}</div><div><small>À faire</small>${sug.filter(plainOrder).length}</div><div><small>Idées</small>${sug.filter(x => !x.held && x.action === 'Acheter').length}</div></div></section>`;
       })() : '')
       + `<section class="card"><div class="row" style="border:0;align-items:center"><span>${!ready ? '<b class="warn">Service de cours à configurer</b>'
           : noAdvice ? `<b class="warn">${noAdvice} titre(s) sans avis</b>` : held.length ? '<b class="good">Tous vos titres ont un avis ✓</b>' : '<b>Bourse</b>'}</span>`
@@ -477,16 +477,16 @@ const views = {
       : tab === 'titles' ? ''
       + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (onglet « Plus ») ou saisissez un achat ci-dessous.'))
         + (lines.length ? row('Valeur des positions', total(lines), 'total') : '')
-        + (missing ? `<div class="warn">${missing} ligne(s) sans cours, exclue(s) du total.</div>` : '')
+        + (missing ? `<div class="warn">${missing} ligne(s) sans cours, comptée(s) au prix d’achat.</div>` : '')
         + empty('Touchez un titre pour voir quoi faire et pourquoi.'))
       + fold('purchase', '➕ J’ai acheté une action', `<form data-form="purchase"><div class="muted">Chez</div>`
-        + `<div class="chips">${byBank(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(accTag(a.id)), view.prefill ? a.id === view.prefill.accountId : !n)).join('')}</div>`
-        + `<label>ISIN<input name="isin" list="isins" value="${esc(view.prefill?.isin ?? '')}" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
+        + `<div class="chips">${byBank(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(accTag(a.id)), !n)).join('')}</div>`
+        + `<label>ISIN<input name="isin" list="isins" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
         + `<datalist id="isins">${S.instruments.map(i => `<option value="${esc(i.isin)}">${esc(i.name)}</option>`).join('')}</datalist>`
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
-        + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" value="${view.prefill ? num(view.prefill.qty) : ''}" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" value="${view.prefill ? euros(view.prefill.amount) : ''}" required></label></div>`
+        + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" required></label></div>`
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
-        + `${view.prefill ? '<div class="warn">Rempli avec l’avis de l’outil : corrigez la quantité et le montant avec ce que vous avez vraiment payé.</div>' : ''}${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans l’onglet « Plus ». Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
+        + `${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans l’onglet « Plus ». Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       : tab === 'ideas' ? ''
       + card('Idées d’achat', (sug.filter(x => !x.held).sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || b.score - a.score).map(titleRow).join('')
           || empty(ready && newsOn(mk) ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (onglet « Plus » → « Réglages bourse »).'))
@@ -497,34 +497,15 @@ const views = {
       + fold('strategy', `🧭 Ma stratégie · ${esc(B.RISK[pf.risk].label)} · ${pf.horizon} ans · ${pf.style === 'actif' ? 'actif' : 'long terme'}`,
         B.strategyRules(S).map(r => `<div class="row"><span><b>${r.n}. ${esc(r.title)}</b><div class="muted">${esc(r.text)}</div></span></div>`).join('')
         + empty(`Chaque avis cite la règle qui l’a décidé. Ces règles viennent de « Mon profil et mes cibles », plus bas. ${B.DISCLAIMER}`))
-      + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
-        (envs.map(e => `<div class="op"><div class="l">${esc(e.label)}<div class="muted">${eur(e.amount)} affectés · ${eur(B.envelopeUsed(S, e.id))} achetés${e.released ? ' · reliquat libéré' : ''}</div></div>`
-          + `<div class="r">Reliquat ${eur(B.envelopeLeft(S, e))}<div class="actions">${B.envelopeLeft(S, e) > 0 ? btn('release', e.id, 'Libérer') : ''}</div></div></div>`).join('')
-          || empty('Aucune enveloppe ce mois (pas de renouvellement automatique).'))
-        + `<form data-form="env" style="margin-top:8px"><div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant €" required><input name="label" placeholder="Libellé" value="Enveloppe bourse"></div>
-          <button class="ghost">Affecter à la bourse (${view.month})</button>${empty('Déduit immédiatement du dépensable du mois.')}</form>`
-        + (open.length ? `<form data-form="buy" style="margin-top:8px"><b>Achat passé chez le courtier</b><select name="envId">${opts(open.map(e => [e.id, `${e.label} · reliquat ${eur(B.envelopeLeft(S, e))}`]))}</select>
-          <div class="grid2"><select name="isin" aria-label="Titre"><option value="">— titre —</option>${instOpts(S.instruments)}</select><input name="qty" inputmode="decimal" placeholder="Quantité"></div>
-          <div class="grid2"><input name="amount" inputmode="decimal" placeholder="Montant frais inclus €" required><select name="accountId">${accOpts(brokers[0]?.id)}</select></div>
-          <input type="hidden" name="date" value="${t}"><input type="hidden" name="label" value="Achat"><button>Enregistrer l’achat</button></form>` : ''))
-      + (S.instruments.length ? fold('trade', 'Saisir une position existante ou une vente',
+      + (S.instruments.length ? fold('trade', 'Saisir un titre que j’avais déjà',
         `<form data-form="holding"><div class="muted">Position détenue avant l’app</div>
           <div class="grid2"><select name="isin">${instOpts(S.instruments)}</select><select name="accountId">${accOpts(brokers[0]?.id)}</select></div>
           <div class="grid2"><input name="qty" inputmode="decimal" placeholder="Quantité" required><input name="cost" inputmode="decimal" placeholder="Prix de revient total €" required></div>
-          <input type="hidden" name="date" value="${t}"><button class="ghost">Ajouter la position</button></form>`
-        + (lines.length ? `<form data-form="sale" style="margin-top:12px"><div class="muted">Vente déjà passée chez le courtier</div>
-          <select name="pos">${opts(lines.map(l => [`${l.accountId}|${l.isin}`, `${accName(l.accountId)} · ${l.inst.name} (${num(l.qty)})`]))}</select>
-          <div class="grid2"><input name="qty" inputmode="decimal" placeholder="Quantité vendue" required><input name="amount" inputmode="decimal" placeholder="Montant net reçu €" required></div>
-          <input type="hidden" name="date" value="${t}"><button class="ghost">Enregistrer la vente</button></form>` : '')) : '')
+          <input type="hidden" name="date" value="${t}"><button class="ghost">Ajouter la position</button></form>`) : '')
       + fold('import', 'Importer un relevé courtier (Fortuneo, Trade Republic, IBKR)', tradeImportBlock(), !!(view.trades || view.snap))
-      + (brokers.length ? fold('brokers', 'Détail par courtier', brokers.map(a => {
-        const ls = lines.filter(l => l.accountId === a.id);
-        return `<h2 style="margin-top:10px">${esc(a.name)} · ${eur(B.accountTotal(S, a, t).total)}</h2>` + row('Encaisse', B.balance(S, a))
-          + ls.map(l => row(`${esc(l.inst.name)} <span class="muted">${num(l.qty)} × ${quoteInfo(l.quote, l.inst)}</span>`, l.value ?? 0)).join('');
-      }).join('') + empty('Change : taux de référence BCE, pas celui du courtier.')) : '')
       + (lines.some(l => l.value != null) ? fold('stress', '📉 Et si ça baisse ?', [10, 20, 30].map(d => `<div class="row"><span>Marché −${d} %</span>${money(-B.stressLoss(S, t, d))}</div>`).join('')
         + (lines.some(l => l.inst.currency === 'USD') ? `<div class="row"><span>Dollar −10 % (titres en $)</span>${money(-B.stressLoss(S, t, 0, 10))}</div>` : '')
-        + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. L’encaisse n’est pas comptée.')) : '')
+        + empty('Perte sur la valeur actuelle du portefeuille si tous les titres baissent d’autant. Les espèces ne sont pas comptées.')) : '')
       + (S.journal?.length ? fold('journal', `📓 Avis de l’outil, vérifiés · ${S.journal.length}`, ((r, ok) => (ok.length ? empty(`${ok.filter(d => d.right).length} avis bien vu(s) sur ${ok.length} déjà jugeable(s).`) : '')
         + r.map(d => decisionRow(d, true)).join(''))(B.journalReview(S), B.journalReview(S).filter(d => d.right != null))
         + empty('Chaque avis Acheter, Renforcer, Alléger ou Vendre est noté tout seul avec le cours du jour. « Bien vu » : le cours a ensuite monté de plus de 2 % après un avis d’achat, ou baissé après un avis de vente.')) : '')
@@ -541,7 +522,7 @@ const views = {
         <div class="chips">${[...new Set([2, 5, 10, 20, pf.horizon])].sort((x, y) => x - y).map(h => chip('horizon', h, `${h} ans`, pf.horizon === h)).join('')}</div>
         <div class="muted">Je supporte une baisse de</div>
         <div class="chips">${Object.entries(B.RISK).map(([k, r]) => chip('risk', k, `${r.label} · ${r.maxLoss} % max`, pf.risk === k)).join('')}</div>
-        ${S.instruments.map(i => `<label>Part visée pour ${esc(i.name)} (%)<input name="t_${esc(i.isin)}" inputmode="decimal" value="${pf.targets[i.isin] ?? ''}"></label>`).join('')}
+        ${S.instruments.filter(i => lines.some(l => l.isin === i.isin) || pf.targets[i.isin]).map(i => `<label>Part visée pour ${esc(i.name)} (%)<input name="t_${esc(i.isin)}" inputmode="decimal" value="${pf.targets[i.isin] ?? ''}"></label>`).join('')}
         <details><summary class="muted">Réglages avancés</summary>
         <div class="grid2"><label>Écart toléré (points)<input name="driftPts" type="number" min="1" max="50" value="${pf.driftPts}"></label>
         <label>Frais par ordre (€)<input name="fee" inputmode="decimal" value="${euros(pf.fee)}"></label></div>
@@ -551,7 +532,6 @@ const views = {
         <label>Adresse de votre service de cours<input name="proxyUrl" type="url" placeholder="https://prix-budget.xxx.workers.dev" value="${esc(mk.proxyUrl)}" autocomplete="off"></label>
         <label>Mot de passe du service<input type="password" name="proxyKey" value="${esc(mk.proxyKey)}" autocomplete="off"></label>
         <label>Clé Marketaux (actualités et idées)<input type="password" name="newsKey" value="${esc(mk.newsKey)}" autocomplete="off"${mk.newsInWorker ? ' placeholder="Rangée dans votre service ✓"' : ''}></label>
-        <details><summary class="muted">Sans service de cours</summary><label>Clé Alpha Vantage (25 cours par jour)<input type="password" name="avKey" value="${esc(mk.avKey)}" autocomplete="off"></label></details>
         <div class="grid2"><button class="ghost">Enregistrer</button>${btn('testKeys', '', 'Tester', 'ghost')}</div></form>
         ${mk.proxyUrl ? `<div style="margin-top:12px"><b>🔔 Alertes même appli fermée</b>${mk.push
           ? `<div class="muted">Actives : votre service vérifie vos titres toutes les 30 min en semaine (seuil de perte, stop suiveur, forte hausse, ±6 % sur une séance).</div><div class="grid2">${btn('pushTest', '', 'Envoyer un essai', 'ghost')}${btn('pushOff', '', 'Désactiver', 'ghost')}</div>`
@@ -633,7 +613,7 @@ const views = {
             return `<div class="${Math.abs(r - k) < 0.05 ? '' : r > k ? 'good' : 'bad'}" style="margin-bottom:8px"><b>${Math.abs(r - k) < 0.05 ? 'Jeu égal entre suivre les règles et garder les titres' : r > k ? 'Suivre les règles aurait fait mieux' : 'Garder les titres sans rien faire aurait fait mieux'} : ${sg(r)} contre ${sg(k)} en moyenne.</b></div>`
               + `<div class="muted">Sur ${bt.length} titre(s), les règles font mieux sur ${won} et moins bien sur ${lost} ; les autres sont à égalité.</div>`
               + bt.map(x => `<div class="row"><span>${esc(x.name)}<div class="muted">depuis le ${shortDate(x.from)} · ${x.trades} opération(s)</div></span><span class="${x.rules >= x.hold ? 'good' : 'bad'}">règles ${sg(x.rules)}<div class="muted">garder ${sg(x.hold)}</div></span></div>`).join('')
-              + empty('Rejouées : tendance, variation sur 3 mois, perte maximale, stop suiveur, prises de bénéfices, pauses et frais. Non rejoués : actualités (pas d’archives), parts visées et limites par ligne, change. Une année passée ne dit pas ce que fera la suivante.');
+              + empty('Rejoués : tendance, variation sur 3 mois, tendance de fond, stop suiveur, prises de bénéfices, pauses, confirmations et frais. Non rejoués : actualités (pas d’archives), alerte de perte (elle ne vend pas), parts visées, limites, versement mensuel, change. Une année passée ne dit pas ce que fera la suivante.');
           })(view.bt, v => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1).replace('.', ',')} %`, key => view.bt.reduce((n, x) => n + x[key], 0) / view.bt.length))
       + (vals.length ? card('📊 Bourse', row('Argent investi (prix de revient)', cost) + row('Valeur actuelle des titres', worth)
         + `<div class="row"><span>Plus-value latente</span>${money(latent)}</div><div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(realized)}</div>`
@@ -735,21 +715,13 @@ const actions = {
   link: id => B.linkTransfer(S, ...pair(id)),
   notLink: id => { for (const o of S.ops) if (pair(id).includes(o.id)) o.notTransfer = true; },
   dismiss: ids => S.dismissedAlerts.push(...ids.split(',')),
-  unmatch: id => B.unmatch(S, id),
   goOps: () => { view.tab = 'ops'; scrollTo(0, 0); },
   period: p => { view.period = p; },
   delRec: id => { S.recurring = S.recurring.filter(r => r.id !== id); },
-  release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
-  stockTab: k => { view.stockTab = k; view.prefill = null; scrollTo(0, 0); },
+  stockTab: k => { view.stockTab = k; scrollTo(0, 0); },
   backtest: () => { view.bt = B.backtest(S); },
-  follow: isin => {
-    const o = B.suggestions(S, today()).find(y => y.isin === isin)?.order;
-    if (!o?.qty) return;
-    view.prefill = { isin, accountId: o.accountId, qty: o.qty, amount: o.amount };
-    view.inst = null; view.open.add('purchase'); view.focusPurchase = true;
-  },
   refreshAll: async () => {
     B.seedEtfs(S);
     const t = today(), errs = [...await refreshMarket(S, t)];
@@ -848,15 +820,11 @@ const forms = {
     view.edit = null; view.sheet = false;
   },
   transfer: f => B.addTransfer(S, f.from, f.to, f.date, positive(f.amount), `Virement ${accName(f.from)} → ${accName(f.to)}`),
-  match: f => B.match(S, f.plannedId, f.realId),
   rec: f => {
     const day = Number(f.day);
     if (!(Number.isInteger(day) && day >= 1 && day <= 31)) throw new Error('Jour invalide');
     S.recurring.push({ id: B.uid(), accountId: f.accountId, kind: f.kind, cents: positive(f.amount), categoryId: f.categoryId || null, label: f.label.trim(), day });
   },
-  env: f => B.addEnvelope(S, view.month, positive(f.amount), f.label.trim() || 'Enveloppe bourse'),
-  buy: f => B.buyFromEnvelope(S, f.envId, f.accountId, f.date, positive(f.amount), `Achat ${S.instruments.find(i => i.isin === f.isin)?.name ?? ''}`.trim(),
-    f.isin || undefined, f.isin ? decimal(f.qty) : undefined),
   search: async f => { view.search = { q: f.q, forIsin: view.search?.forIsin, results: await searchSymbols(S, f.q.trim()) }; },
   instrument: f => B.saveInstrument(S, f),
   profile: f => {
@@ -873,7 +841,7 @@ const forms = {
     const proxyUrl = f.proxyUrl.trim();
     if (proxyUrl && !/^https:\/\//.test(proxyUrl)) throw new Error('L’adresse du service doit commencer par https://');
     if (proxyUrl !== S.settings.market.proxyUrl) for (const i of S.instruments) delete i.ysym; // listings are looked up again by the new service
-    Object.assign(S.settings.market, { enabled: f.enabled === 'on', proxyUrl, proxyKey: f.proxyKey.trim(), avKey: f.avKey.trim(), newsKey: f.newsKey.trim() });
+    Object.assign(S.settings.market, { enabled: f.enabled === 'on', proxyUrl, proxyKey: f.proxyKey.trim(), newsKey: f.newsKey.trim() });
   },
   holding: f => {
     const qty = decimal(f.qty), cost = parseEur(f.cost), q = S.quotes[f.isin], i = S.instruments.find(x => x.isin === f.isin);
@@ -898,7 +866,6 @@ const forms = {
   purchase: f => {
     const x = B.suggestions(S, today()).find(y => y.isin === String(f.isin).trim().toUpperCase()); // the advice in force, kept with the purchase
     view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount), advice: x && ['Acheter', 'Renforcer'].includes(x.action) ? { action: x.action, rule: x.order.rule } : undefined });
-    view.prefill = null;
   },
   cash: f => { for (const [k, v] of Object.entries(f)) if (k.startsWith('c_') && String(v).trim()) B.setCash(S, k.slice(2), f.date, parseEur(v)); },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
@@ -950,7 +917,6 @@ function render() {
   if (B.settleDue(S, today())) save(); // due items are paid on their date, no button to press
   app.innerHTML = (!S.accounts.length && view.tab !== 'settings' ? onboarding() : views[view.tab]()) + sheet();
   if (view.focusAmount) { view.focusAmount = false; app.querySelector('.sheet [name=amount]')?.focus(); }
-  if (view.focusPurchase) { view.focusPurchase = false; app.querySelector('[data-form="purchase"]')?.scrollIntoView({ block: 'center' }); }
   for (const b of document.querySelectorAll('nav button')) b.toggleAttribute('aria-current', b.dataset.tab === view.tab);
   document.querySelector(`nav [data-tab="${view.tab}"]`).setAttribute('aria-current', 'page');
 }

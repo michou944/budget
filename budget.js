@@ -223,19 +223,13 @@ export function unlinkTransfer(s, transferId) {
 
 // ---- planned / recurring ----
 
-export function matchCandidates(s, planned) {
-  return s.ops
-    .filter(o => !o.planned && !o.plannedId && o.kind === planned.kind && monthOf(o.date) === monthOf(planned.date))
-    .sort((a, b) => Math.abs(a.amount - planned.amount) - Math.abs(b.amount - planned.amount));
-}
-
 export function match(s, plannedId, realId) {
   const r = s.ops.find(o => o.id === realId);
   if (!r || r.planned) throw new Error('Opération réelle introuvable');
   unmatchPlanned(s, plannedId);
   r.plannedId = plannedId;
 }
-export const unmatch = unmatchPlanned;
+
 
 // A real operation that looks like a planned one settles it, so it is never counted twice: same month and
 // direction, same account or category, amount within 10 % (at least 5 €). The closest amount wins.
@@ -408,9 +402,9 @@ export function watchList(s, today) {
     if (!mine.length) continue;
     const qty = mine.reduce((a, l) => a + l.qty, 0), cost = mine.reduce((a, l) => a + l.cost, 0);
     const rate = i.currency === 'EUR' ? 1 : s.fx[i.currency]?.rate, tr = trend(s, i.isin), rules = [];
-    if (rate) rules.push({ below: r2((cost / qty / 100) * rate * (1 - risk.maxLoss / 100)), msg: `perte de ${risk.maxLoss} % atteinte, votre limite : à alléger ?` });
+    if (rate) rules.push({ below: r2((cost / qty / 100) * rate * (1 - risk.maxLoss / 100)), msg: `perte de ${risk.maxLoss} % atteinte, votre limite : à examiner (pas de vente automatique)` });
     const hi = peakSince(s, i.isin, mine.map(l => lineStart(s, l.accountId, i.isin)).sort()[0]);
-    if (p.horizon < 5 && hi) rules.push({ below: r2(hi * (1 - risk.trail / 100)), msg: `${risk.trail} % sous son plus haut (stop suiveur) : à alléger ?` });
+    if (p.horizon < 5 && hi) rules.push({ below: r2(hi * (1 - risk.trail / 100)), msg: `${risk.trail} % sous son plus haut depuis l’achat (stop suiveur) : vendre la moitié ?` });
     if (p.style === 'actif' && tr) {
       rules.push({ above: r2(tr.sma50 * 1.12), msg: 'forte hausse : prendre une partie des bénéfices ?' });
       if (tr.first < tr.sma50) rules.push({ below: r2(tr.sma50 * 0.93), msg: 'repli dans une tendance qui monte : occasion de racheter ?' });
@@ -737,7 +731,7 @@ export function strategyRules(s) {
     { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
     { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : en style actif, vendre un tiers (tout vendre à −3) ; en long terme, alerte à examiner, sans vente. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille ; une vente décidée par ces seuls signaux (style actif) aussi. Les stops restent immédiats.' },
     { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
-    { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés. Si votre épargne de précaution couvre moins de 3 mois de dépenses, chaque achat le signale.' },
+    { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. Les achats se paient avec les espèces du PEA ou du CTO, partagées entre les signaux du jour. Les livrets ne sont jamais utilisés. Si votre épargne de précaution couvre moins de 3 mois de dépenses, chaque achat le signale.' },
     { n: 10, title: 'Pause après une opération', text: `Après une vente sur une ligne, les règles 5, 6 et la vente d’un tiers (règle 7) ne se déclenchent plus pendant ${SALE_PAUSE} jours. Après un achat, pas de nouveau renforcement pendant ${SALE_PAUSE} jours. Sinon, la même règle revendrait ou rachèterait une partie à chaque fois.` },
     { n: 11, title: 'Tendance de fond', text: 'Une action n’est achetée ou renforcée que si son cours est au-dessus de sa moyenne 200 jours (dès que l’appli a un an de cours) : on n’achète pas une action en baisse durable.' },
     { n: 12, title: 'Cœur et satellite', text: (p.coreMin ? `Au moins ${p.coreMin} % de vos titres en ETF larges (le cœur). Si les actions (le satellite) dépassent ${100 - p.coreMin} %, plus d’achat d’action. ` : 'Pas d’objectif de cœur dans votre profil. ')
@@ -941,7 +935,7 @@ export function suggestions(s, today) {
       const qty = a.fractional ? Math.max(0, Math.floor(((limit - fixed) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - fixed) / unit));
       const spend = qty ? (a.fractional ? Math.round(qty * raw) : qty * unit) + fixed : 0;
       return { a, limit, qty, unit, total: spend, known, wantQty, wantTotal: wantQty ? (a.fractional ? Math.round(wantQty * raw) : wantQty * unit) + fixed : 0, fees: qty ? spend - Math.round((qty * price * 100) / rate) : 0,
-        where: !env ? `espèces de ${a.name}, part de ce signal` : !known ? 'reliquat de l’enveloppe, encaisse inconnue' : cash < left ? `limité par l’encaisse ${a.name}` : 'reliquat de l’enveloppe' };
+        where: !env ? `espèces de ${a.name}, part de ce signal` : !known ? 'reliquat de l’enveloppe, espèces inconnues' : cash < left ? `limité par les espèces de ${a.name}` : 'reliquat de l’enveloppe' };
     };
     const plans = accounts.map(plan);
     // a PEA wins when it can buy (less tax after 5 years); otherwise the account buying the most, then the cheapest

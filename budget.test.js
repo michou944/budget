@@ -320,7 +320,7 @@ test('Verdict: the under-target title gets the envelope purchase, fees included,
   assert.equal(v.action, 'Acheter'); assert.equal(v.buy.qty, 2); assert.equal(v.buy.total, 2 * 56120 + 195); // Fortuneo's estimated fee
   s.accounts[1].opening = 60000; // cash now lower than the envelope
   v = verdict(s, CW8);
-  assert.equal(v.buy.qty, 1); assert.ok(v.buy.total <= 60000); assert.match(v.reasons.at(-1).text, /encaisse/);
+  assert.equal(v.buy.qty, 1); assert.ok(v.buy.total <= 60000); assert.match(v.reasons.at(-1).text, /espèces/);
   s.accounts[1].opening = 50000;
   v = verdict(s, CW8);
   assert.equal(v.buy, undefined); assert.match(v.reasons.at(-1).text, /insuffisant/);
@@ -335,7 +335,7 @@ test('Verdict: with 100 € a fractional-share account buys part of an expensive
   B.applySnapshot(s, 't', { date: '2026-11-01', lines: [] }, 'test'); // a brokerage account whose cash the app does not know
   const v = verdict(s, CW8);
   assert.equal(v.buy.accountId, 't'); assert.equal(v.buy.qty, 0.176); assert.ok(v.buy.total <= 10000);
-  assert.match(v.reasons.at(-1).text, /0,176 part sur TR .*encaisse inconnue/);
+  assert.match(v.reasons.at(-1).text, /0,176 part sur TR .*espèces inconnues/);
 });
 
 test('Verdict: a non-EUR purchase includes conversion cost and stays within the limit', () => {
