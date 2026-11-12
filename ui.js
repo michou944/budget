@@ -337,11 +337,9 @@ const views = {
 
     const titleRow = x => {
       const ls = lines.filter(l => l.isin === x.isin), q = S.quotes[x.isin], i = inst(x.isin);
-      const main = [...x.reasons].sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts))[0];
       const gain = ls.reduce((a, l) => a + (l.gain ?? 0), 0);
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accTag(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
-        + `<div class="muted">${main ? esc(main.text) : ''}</div>`
         + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.funded && !x.order.pending ? 'good' : 'warn'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
@@ -363,6 +361,10 @@ const views = {
           const rs = x.reasons.filter(keep);
           return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}${r.rule ? ` <span class="tag">Règle ${r.rule}</span>` : ''}</span></div>`).join('') : '';
         }).join('')
+        + '<div class="day">📰 Actualités</div>'
+        + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
+          + `<div class="muted">${esc(n.source)} · ${n.publishedAt}${Number.isFinite(n.sentiment) ? ` · ton ${n.sentiment > 0.2 ? 'positif' : n.sentiment < -0.2 ? 'négatif' : 'neutre'}` : ''}</div></div></div>`).join('') || empty('Aucune actualité sur les 14 derniers jours.'))
+        + '<details style="margin-top:12px"><summary><b>📊 Détails de l’analyse</b> <span class="muted">indicateurs, simulation, historique</span></summary>'
         + (x.missing?.length ? `<div class="day">❔ Données manquantes</div>${x.missing.map(m => `<div class="muted">• ${esc(m)}</div>`).join('')}` : '')
         + (x.invalidation ? `<div class="day">🔄 Ce qui changerait l’avis</div><div class="muted">${esc(x.invalidation)}</div>` : '')
         + (x.confidence ? `<div class="day">Confiance : ${x.confidence}</div>${empty('Qualité et quantité des données derrière cet avis, pas une probabilité de gain.')}` : '')
@@ -388,9 +390,7 @@ const views = {
         + ((ops => (ops.length ? `<details style="margin-top:8px"><summary class="muted">Historique des opérations · ${ops.length}</summary>`
           + ops.map(o => `<div class="row"><span>${shortDate(o.date)} · ${esc(accName(o.accountId))} · ${esc(o.label)}${o.qty ? ` · ${num(Math.abs(o.qty))} part(s)` : ''}</span>${o.split ? '' : titleAmount(o)}</div>`).join('') + '</details>' : ''))(
           S.ops.filter(o => o.isin === isin).sort((a, b) => b.date.localeCompare(a.date))))
-        + '<h2 style="margin-top:10px">Actualités</h2>'
-        + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
-          + `<div class="muted">${esc(n.source)} · ${n.publishedAt}${Number.isFinite(n.sentiment) ? ` · ton ${n.sentiment > 0.2 ? 'positif' : n.sentiment < -0.2 ? 'négatif' : 'neutre'}` : ''}</div></div></div>`).join('') || empty('Aucune actualité sur les 14 derniers jours.'))
+        + '</details>'
         + '<details style="margin-top:12px"><summary><b>⚙️ Gérer ce titre</b> <span class="muted">compte, vente, division</span></summary>'
         + lines.filter(l => l.isin === isin).map(l => ((to => (to.length ? `<form data-form="move" style="margin-top:8px"><input type="hidden" name="isin" value="${esc(isin)}"><input type="hidden" name="from" value="${esc(l.accountId)}">`
           + `<b>Sur ${esc(accTag(l.accountId))}</b> <span class="muted">· ${num(l.qty)} part(s) · le déplacer vers :</span><div class="chips">${to.map((a, n) => chip('to', a.id, esc(accTag(a.id)), !n)).join('')}</div>`
@@ -418,12 +418,18 @@ const views = {
         `<form data-form="search" class="grid2" style="grid-template-columns:1fr auto"><input name="q" placeholder="Nom ou ticker : MSCI World, TotalEnergies…" value="${esc(sr?.q)}" required><button class="small">Chercher</button></form>`
         + (sr ? sr.results.map((r, k) => `<div class="op"><div class="l">${esc(r.name)}<div class="muted">${esc(r.symbol)} · ${esc(r.type)} · ${esc(r.region)} · ${esc(r.currency)}</div></div>`
           + `<div class="r">${btn('pick', k, target ? 'Choisir' : 'Suivre', 'small')}</div></div>`).join('') || empty('Aucun résultat : essayez le ticker ou un autre nom.') : '')
-        + (ready ? '' : empty('La recherche a besoin du service de cours : voir « Réglages bourse » plus bas.'))
+        + (ready ? '' : empty('La recherche a besoin du service de cours : onglet « Plus » → « Réglages bourse ».'))
 );
     };
 
-    return (view.inst ? sheet(view.inst) : '')
-      + (view.search?.forIsin ? searchCard() : '')
+    // one screen per need instead of one long page; some actions bring their own tab forward
+    const todoN = sug.filter(x => (x.order?.side && x.order.qty) || x.action === 'À examiner').length;
+    const tab = view.trades || view.snap ? 'more' : sr0 ? 'ideas' : view.prefill ? 'titles' : view.stockTab ?? (ready || lines.length ? 'today' : 'more');
+    if (view.inst) return (view.search?.forIsin ? searchCard() : '') + sheet(view.inst);
+    return (view.search?.forIsin ? searchCard() : '')
+      + `<div class="seg" style="margin-bottom:12px">${[['today', `À faire${todoN ? ` · ${todoN}` : ''}`], ['titles', 'Titres'], ['ideas', 'Idées'], ['more', 'Plus']]
+        .map(([k, l]) => `<button class="${tab === k ? '' : 'ghost'}" data-act="stockTab" data-id="${k}">${l}</button>`).join('')}</div>`
+      + (tab === 'today' ? ''
       + (lines.length ? (() => {
         const valued = lines.filter(l => l.value != null), gainAll = valued.reduce((a, l) => a + l.gain, 0), costAll = valued.reduce((a, l) => a + l.cost, 0);
         return `<section class="hero"><div class="lbl">Mon portefeuille</div><div class="big">${eur(total(lines))}</div>`
@@ -433,26 +439,20 @@ const views = {
       + `<section class="card"><div class="row" style="border:0;align-items:center"><span>${!ready ? '<b class="warn">Service de cours à configurer</b>'
           : noAdvice ? `<b class="warn">${noAdvice} titre(s) sans avis</b>` : held.length ? '<b class="good">Tous vos titres ont un avis ✓</b>' : '<b>Bourse</b>'}</span>`
         + (ready ? btn('refreshAll', '', 'Actualiser', 'small') : '') + '</div>'
-        + (!ready ? empty('Ouvrez « Réglages bourse » en bas de page : 5 minutes de configuration, une seule fois.') : '')
+        + (!ready ? empty('Onglet « Plus » → « Réglages bourse » : 5 minutes de configuration, une seule fois.') : '')
         + (view.refreshing ? empty('⏳ Actualisation des cours, actualités et avis…') : lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
-        + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '')
+        + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '') + '</section>'
       + ((todo, odd, gone) => card('🎯 Conclusion du jour', (todo.length || odd.length ? [...todo, ...odd].map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}<div class="${x.order.side === 'vente' ? 'bad' : x.order.side === 'achat' && (!x.order.funded || x.order.pending) ? 'warn' : x.order.side ? 'good' : 'muted'}"><b>${esc(x.order.text)}</b></div><div class="muted">${esc(x.facts ?? '')}</div></div></div>`).join('')
           : empty(lines.length ? 'Aucune opération aujourd’hui : vos règles ne déclenchent ni achat ni vente.' : 'Aucune opération proposée pour l’instant.'))
         + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente').reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
         + (gone ? `<div class="warn">${gone} titre(s) sans conclusion : cours manquant ou périmé.</div>` : '')
         + empty(`Calcul fusionnant cours, tendance, actualités, vos limites et vos parts visées. Les résultats des sociétés ne sont pas analysés. ${B.DISCLAIMER}`)))(
         [...sug.filter(x => x.order?.side === 'vente'), ...sug.filter(x => x.order?.side === 'achat' && x.order.qty)], sug.filter(x => x.action === 'À examiner'), sug.filter(x => x.suspended && x.held).length)
-      + fold('strategy', `🧭 Ma stratégie · ${esc(B.RISK[pf.risk].label)} · ${pf.horizon} ans · ${pf.style === 'actif' ? 'actif' : 'long terme'}`,
-        B.strategyRules(S).map(r => `<div class="row"><span><b>${r.n}. ${esc(r.title)}</b><div class="muted">${esc(r.text)}</div></span></div>`).join('')
-        + empty(`Chaque avis cite la règle qui l’a décidé. Ces règles viennent de « Mon profil et mes cibles », dans Autres options. ${B.DISCLAIMER}`))
-      + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (plus bas).'))
+      : tab === 'titles' ? ''
+      + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (onglet « Plus ») ou saisissez un achat ci-dessous.'))
         + (lines.length ? row('Valeur des positions', total(lines), 'total') : '')
         + (missing ? `<div class="warn">${missing} ligne(s) sans cours, exclue(s) du total.</div>` : '')
-        + empty('Touchez un titre pour voir pourquoi : Renforcer, Conserver, Alléger ou Vendre.'))
-      + card('Idées d’achat', (sug.filter(x => !x.held).sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || b.score - a.score).map(titleRow).join('')
-          || empty(ready && newsOn(mk) ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (« Réglages bourse » plus bas).'))
-        + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
-        + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
+        + empty('Touchez un titre pour voir quoi faire et pourquoi.'))
       + fold('purchase', '➕ J’ai acheté une action', `<form data-form="purchase"><div class="muted">Chez</div>`
         + `<div class="chips">${byBank(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(accTag(a.id)), view.prefill ? a.id === view.prefill.accountId : !n)).join('')}</div>`
         + `<label>ISIN<input name="isin" list="isins" value="${esc(view.prefill?.isin ?? '')}" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
@@ -460,9 +460,17 @@ const views = {
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
         + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" value="${view.prefill ? num(view.prefill.qty) : ''}" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" value="${view.prefill ? euros(view.prefill.amount) : ''}" required></label></div>`
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
-        + `${view.prefill ? '<div class="warn">Rempli avec l’avis de l’outil : corrigez la quantité et le montant avec ce que vous avez vraiment payé.</div>' : ''}${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans Autres options. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
-      + `<details class="card fold" data-fold="more"${!ready || sr0 || view.trades || view.snap || view.open.has('more') ? ' open' : ''}><summary>⚙️ Autres options</summary>`
+        + `${view.prefill ? '<div class="warn">Rempli avec l’avis de l’outil : corrigez la quantité et le montant avec ce que vous avez vraiment payé.</div>' : ''}${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans l’onglet « Plus ». Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
+      : tab === 'ideas' ? ''
+      + card('Idées d’achat', (sug.filter(x => !x.held).sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || b.score - a.score).map(titleRow).join('')
+          || empty(ready && newsOn(mk) ? 'Appuyez sur « Actualiser ».' : 'Il faut le service de cours et la clé Marketaux (onglet « Plus » → « Réglages bourse »).'))
+        + empty('Sociétés dont on parle le plus en bien et dont le cours monte, plus 4 ETF larges.')
+        + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
       + (view.search?.forIsin ? '' : searchCard())
+      : ''
+      + fold('strategy', `🧭 Ma stratégie · ${esc(B.RISK[pf.risk].label)} · ${pf.horizon} ans · ${pf.style === 'actif' ? 'actif' : 'long terme'}`,
+        B.strategyRules(S).map(r => `<div class="row"><span><b>${r.n}. ${esc(r.title)}</b><div class="muted">${esc(r.text)}</div></span></div>`).join('')
+        + empty(`Chaque avis cite la règle qui l’a décidé. Ces règles viennent de « Mon profil et mes cibles », plus bas. ${B.DISCLAIMER}`))
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
         (envs.map(e => `<div class="op"><div class="l">${esc(e.label)}<div class="muted">${eur(e.amount)} affectés · ${eur(B.envelopeUsed(S, e.id))} achetés${e.released ? ' · reliquat libéré' : ''}</div></div>`
           + `<div class="r">Reliquat ${eur(B.envelopeLeft(S, e))}<div class="actions">${B.envelopeLeft(S, e) > 0 ? btn('release', e.id, 'Libérer') : ''}</div></div></div>`).join('')
@@ -529,7 +537,7 @@ const views = {
         ${S.requestLog.slice(0, 10).map(r => `<div class="muted">${r.at.slice(0, 16).replace('T', ' ')} · ${esc(r.host)} · ${esc(r.symbols.join(', '))}</div>`).join('')}`, !ready)
       + (S.instruments.length ? fold('manual', 'Saisir un cours à la main', `<form data-form="quote"><select name="isin">${instOpts(S.instruments)}</select>
         <div class="grid2"><input name="price" inputmode="decimal" placeholder="Cours (devise de cotation)" required><input type="date" name="date" value="${t}" required></div><button class="ghost">Enregistrer le cours</button></form>`) : '')
-      + '</details>';
+      );
   },
 
   stats() {
@@ -705,6 +713,7 @@ const actions = {
   release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
+  stockTab: k => { view.stockTab = k; view.prefill = null; scrollTo(0, 0); },
   backtest: () => { view.bt = B.backtest(S); },
   follow: isin => {
     const o = B.suggestions(S, today()).find(y => y.isin === isin)?.order;
