@@ -1033,3 +1033,14 @@ test('Checks: savings near their ceiling, with the room left elsewhere', () => {
   assert.match(c, /Livret A : 22 ?000,00 € sur 22 ?950,00 € de plafond\. Place restante : LDDS \(10 ?000,00 €\)/);
   assert.doesNotMatch(c, /LDDS : /);
 });
+
+test('Backtest: the real rules replayed day by day, against keeping the title', () => {
+  const s = withInstruments();
+  const h = Array.from({ length: 200 }, (_, k) => [dateBack(199 - k), k < 70 ? 100 : 100 - ((k - 70) * 50) / 129]); // flat, then halves
+  B.setHistory(s, ETF, h, 'test', T);
+  const [r] = B.backtest(s);
+  assert.equal(r.isin, ETF); assert.ok(r.trades >= 1);
+  assert.ok(Math.abs(r.hold + 50) < 1); // keeping it: about −50 %
+  assert.ok(r.rules > r.hold + 10, `rules ${r.rules} vs hold ${r.hold}`); // the loss limit got out early
+  assert.deepEqual(B.backtest(withInstruments()), []); // no prices, no test
+});

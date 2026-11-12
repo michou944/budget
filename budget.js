@@ -524,6 +524,32 @@ export function strategyReport(s, today) {
   }
   return { invested, back, value, gain, bench };
 }
+// Replays the real rules day by day on the known prices, 1 000 € per title, against simply keeping the title.
+// shortcut: past news cannot be replayed and a lone title has no target or weight limit, so only the price rules and the risk
+// limits act; prices are taken as euros (currency moves left out) and each sale pays the profile's fee estimate
+export function backtest(s) {
+  const p = s.settings.profile, START = 64, out = [];
+  for (const i of s.instruments.filter(x => !x.auto && (s.history[x.isin]?.length ?? 0) >= START + 20)) {
+    const h = s.history[i.isin], t = emptyState(), [d0, p0] = h[START];
+    t.settings.profile = { ...p, targets: {}, maxWeight: 0 };
+    t.accounts.push({ id: 'bt', name: 'test', institution: '', opening: 0, type: 'CTO', fractional: true, feeFixed: p.fee, feePct: 0, fxPct: 0 });
+    t.instruments.push({ isin: i.isin, name: i.name, symbol: '', place: '', currency: 'EUR', type: i.type ?? '' });
+    t.ops.push({ id: uid(), accountId: 'bt', date: d0, amount: 0, cost: 100000, kind: 'invest', isin: i.isin, qty: 1000 / p0, label: 'Position existante', seq: stamp(t) });
+    let trades = 0;
+    for (let k = START + 1; k < h.length; k++) {
+      const day = h[k][0];
+      setHistory(t, i.isin, h.slice(0, k + 1), 'test', day);
+      const o = suggestions(t, day).find(x => x.isin === i.isin)?.order;
+      if (o?.side === 'vente' && o.qty) { addSale(t, 'bt', i.isin, day, o.qty, Math.max(1, Math.round(o.amount - p.fee))); trades++; }
+      else if (o?.side === 'achat' && o.qty && o.funded && !o.pending) { addPurchase(t, { accountId: 'bt', isin: i.isin, date: day, qty: o.qty, cents: o.amount }); trades++; }
+      logVerdicts(t, day); // what the app does after each refresh: buy signals get confirmed the next day
+    }
+    const last = h.at(-1)[1], qty = positions(t).find(x => x.isin === i.isin)?.qty ?? 0;
+    const end = Math.round(qty * last * 100) + balance(t, t.accounts[0]);
+    out.push({ isin: i.isin, name: i.name, from: d0, hold: (last / p0 - 1) * 100, rules: (end / 100000 - 1) * 100, trades });
+  }
+  return out;
+}
 export const realizedGain = (s, isin) => book(s).filter(p => p.isin === isin).reduce((a, p) => a + p.realized, 0);
 
 // Decision journal: what I decided, why, at what price and what the tool said; reviewed later against the current price.

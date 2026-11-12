@@ -587,6 +587,17 @@ const views = {
           + (r.bench.early ? empty(`Les achats d’avant le ${shortDate(r.bench.from)} sont comparés au premier cours connu de l’ETF.`) : '')
           : empty('Comparaison indisponible : suivez l’ETF Amundi MSCI World (CW8) dans Bourse, puis actualisez.'))
         + empty('Résultat = valeur actuelle + ventes − argent investi, dividendes non compris. L’ETF fait le même calcul, comme si chaque achat et chaque vente avaient été faits sur lui.'))))(B.strategyReport(S, t)))
+      + card('🧪 Test des règles sur l’année écoulée', !view.bt
+        ? empty('Rejoue vos règles jour par jour sur l’année de cours connue, avec 1 000 € par titre, et compare avec le fait de simplement garder le titre.')
+          + `<div style="margin-top:8px">${btn('backtest', '', 'Lancer le test', 'ghost')}</div>`
+        : !view.bt.length ? empty('Pas assez d’historique : actualisez les cours (il faut au moins 4 mois de cours par titre).')
+          : ((bt, sg, avg) => {
+            const r = avg('rules'), k = avg('hold'), won = bt.filter(x => x.rules > x.hold + 0.05).length, lost = bt.filter(x => x.rules < x.hold - 0.05).length;
+            return `<div class="${Math.abs(r - k) < 0.05 ? '' : r > k ? 'good' : 'bad'}" style="margin-bottom:8px"><b>${Math.abs(r - k) < 0.05 ? 'Jeu égal entre suivre les règles et garder les titres' : r > k ? 'Suivre les règles aurait fait mieux' : 'Garder les titres sans rien faire aurait fait mieux'} : ${sg(r)} contre ${sg(k)} en moyenne.</b></div>`
+              + `<div class="muted">Sur ${bt.length} titre(s), les règles font mieux sur ${won} et moins bien sur ${lost} ; les autres sont à égalité.</div>`
+              + bt.map(x => `<div class="row"><span>${esc(x.name)}<div class="muted">depuis le ${shortDate(x.from)} · ${x.trades} opération(s)</div></span><span class="${x.rules >= x.hold ? 'good' : 'bad'}">règles ${sg(x.rules)}<div class="muted">garder ${sg(x.hold)}</div></span></div>`).join('')
+              + empty('Rejouées : tendance, variation sur 3 mois, perte maximale, stop suiveur, prises de bénéfices, pauses et frais. Non rejoués : actualités (pas d’archives), parts visées et limites par ligne, change. Une année passée ne dit pas ce que fera la suivante.');
+          })(view.bt, v => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(1).replace('.', ',')} %`, key => view.bt.reduce((n, x) => n + x[key], 0) / view.bt.length))
       + (vals.length ? card('📊 Bourse', row('Argent investi (prix de revient)', cost) + row('Valeur actuelle des titres', worth)
         + `<div class="row"><span>Plus-value latente</span>${money(latent)}</div><div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(realized)}</div>`
         + (divs ? `<div class="row"><span>Dividendes reçus (12 mois)</span>${money(divs)}</div>` : '')
@@ -694,6 +705,7 @@ const actions = {
   release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
+  backtest: () => { view.bt = B.backtest(S); },
   follow: isin => {
     const o = B.suggestions(S, today()).find(y => y.isin === isin)?.order;
     if (!o?.qty) return;
