@@ -20,7 +20,7 @@ export function emptyState() {
 }
 
 // fee in cents per order, fxPct = conversion cost on non-EUR orders, targets = {isin: % of portfolio}
-const defaultProfile = () => ({ style: 'long', horizon: 10, risk: 'equilibre', driftPts: 5, fee: 100, fxPct: 0.25, targets: {} });
+const defaultProfile = () => ({ style: 'long', horizon: 10, risk: 'equilibre', driftPts: 5, fee: 100, fxPct: 0.25, maxWeight: 10, targets: {} });
 
 export function validateState(x) {
   if (x?.version === 1 && x.settings) { // v1 → v2: market data (lot 2)
@@ -29,6 +29,7 @@ export function validateState(x) {
   }
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
     x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {}; x.discovery ??= { date: null, items: {} };
+    x.settings.profile.maxWeight ??= 10; // never chosen: the usual 10 % per stock; « no limit » stays a choice (0)
     x.settings.lowSpendable ??= 10000; x.notified ??= { verdicts: {}, sent: [] }; x.journal ??= [];
     // sales saved by v32-v35 did not reach the cash
     for (const o of x.ops ?? []) if (o.proceeds != null) { o.amount = o.proceeds; delete o.proceeds; }
@@ -373,6 +374,21 @@ export function trend(s, isin) {
 // Levels watched by the Worker while the app is closed, for held titles with a Yahoo listing: the profile's maximum loss,
 // the trailing stop (horizon under 5 years) and, in active style, the take-profit and buy-back levels; plus any ±6 % day.
 // Prices in the listing's currency; no quantity or amount leaves the phone.
+// When a line started: its first purchase, or the statement it was imported from.
+export const lineStart = (s, accountId, isin) => [...s.ops.filter(o => o.accountId === accountId && o.isin === isin && o.qty > 0).map(o => o.date),
+  ...(s.snapshots?.[accountId]?.lines.some(x => x.isin === isin) ? [s.snapshots[accountId].date] : [])].sort()[0] ?? null;
+// Highest price since `from`: a high reached before buying says nothing about this line's gain.
+export function peakSince(s, isin, from) {
+  const pk = s.peaks[isin];
+  return Math.max(0, ...(s.history[isin] ?? []).filter(([d]) => !from || d >= from).map(x => x[1]), pk && (!from || pk.asOf >= from) ? pk.price : 0, s.quotes[isin]?.price ?? 0);
+}
+// Months of spending the savings accounts cover (life insurance aside); null without spending history.
+export function cushionMonths(s, today) {
+  const spent = monthsBack(monthOf(today), 13).slice(0, -1).map(m => monthStats(s, m).spent).filter(v => v > 0);
+  if (!spent.length) return null;
+  return sum(s.accounts.filter(a => a.savings && (a.sub ?? guessSub(a.name)) !== 'av'), a => balance(s, a)) / (sum(spent, v => v) / spent.length);
+}
+
 export function watchList(s, today) {
   const p = s.settings.profile, risk = RISK[p.risk] ?? RISK.equilibre, lines = valuation(s, today), r2 = x => Math.round(x * 100) / 100, out = [];
   for (const i of s.instruments.filter(i => i.ysym)) {
@@ -381,7 +397,7 @@ export function watchList(s, today) {
     const qty = mine.reduce((a, l) => a + l.qty, 0), cost = mine.reduce((a, l) => a + l.cost, 0);
     const rate = i.currency === 'EUR' ? 1 : s.fx[i.currency]?.rate, tr = trend(s, i.isin), rules = [];
     if (rate) rules.push({ below: r2((cost / qty / 100) * rate * (1 - risk.maxLoss / 100)), msg: `perte de ${risk.maxLoss} % atteinte, votre limite : à alléger ?` });
-    const hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
+    const hi = peakSince(s, i.isin, mine.map(l => lineStart(s, l.accountId, i.isin)).sort()[0]);
     if (p.horizon < 5 && hi) rules.push({ below: r2(hi * (1 - risk.trail / 100)), msg: `${risk.trail} % sous son plus haut (stop suiveur) : à alléger ?` });
     if (p.style === 'actif' && tr) {
       rules.push({ above: r2(tr.sma50 * 1.12), msg: 'forte hausse : prendre une partie des bénéfices ?' });
@@ -491,8 +507,9 @@ export function wealthSeries(s, months, today) {
 }
 // Each line's plan: its last purchase and the advice behind it, how it did since, and the levels where a rule acts.
 export function linePlan(s, today, isin) {
-  const p = s.settings.profile, r = RISK[p.risk], tr = trend(s, isin), hi = Math.max(tr?.high ?? 0, s.peaks[isin]?.price ?? 0);
+  const p = s.settings.profile, r = RISK[p.risk];
   return valuation(s, today).filter(l => l.isin === isin).map(l => {
+    const hi = peakSince(s, isin, lineStart(s, l.accountId, isin));
     const last = s.ops.filter(o => o.accountId === l.accountId && o.isin === isin && o.qty > 0 && !['Position existante', 'Position transférée'].includes(o.label))
       .sort((a, b) => a.date.localeCompare(b.date)).at(-1);
     const paid = last ? (last.cost ?? -last.amount) / last.qty : null, unit = l.value != null ? l.value / l.qty : null, pru = l.cost / l.qty;
@@ -696,13 +713,13 @@ export function strategyRules(s) {
   return [
     { n: 1, title: 'Données fiables', text: 'Sans cours récent ou sans taux de change à jour : pas d’avis, aucune opération.' },
     { n: 2, title: 'Part visée', text: targets ? `Chaque titre revient vers sa part visée, à ${p.driftPts} points près. Trop haut : vendre l’excédent. Trop bas : acheter jusqu’à la cible.` : 'Inactive : aucune part visée dans votre profil.' },
-    { n: 3, title: 'Limite par ligne', text: p.maxWeight ? `Une ligne ne dépasse pas ${p.maxWeight} % du portefeuille : au-delà, aucun renforcement.` : 'Inactive : pas de limite dans votre profil.' },
+    { n: 3, title: 'Limite par ligne', text: p.maxWeight ? `Une action ne dépasse pas ${p.maxWeight} % du portefeuille : au-delà, aucun renforcement. Les ETF larges, déjà diversifiés, ne sont pas limités.` : 'Inactive : pas de limite dans votre profil.' },
     { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : alerte « à examiner », sans vente automatique. Testée sur l’année passée, la vente automatique vendait près du point bas des titres qui sont ensuite remontés.` },
-    { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
+    { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut atteint après votre achat : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
     { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
-    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille.' },
+    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : en style actif, vendre un tiers (tout vendre à −3) ; en long terme, alerte à examiner, sans vente. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille.' },
     { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
-    { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés.' },
+    { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés. Si votre épargne de précaution couvre moins de 3 mois de dépenses, chaque achat le signale.' },
     { n: 10, title: 'Pause après une opération', text: `Après une vente sur une ligne, les règles 5, 6 et la vente d’un tiers (règle 7) ne se déclenchent plus pendant ${SALE_PAUSE} jours. Après un achat, pas de nouveau renforcement pendant ${SALE_PAUSE} jours. Sinon, la même règle revendrait ou rachèterait une partie à chaque fois.` },
   ];
 }
@@ -787,7 +804,7 @@ export function suggestions(s, today) {
     }
     for (const l of mine) {
       if (lastSale(l)) continue;
-      const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
+      const gain = ((l.value - l.cost) * 100) / l.cost, hi = peakSince(s, i.isin, lineStart(s, l.accountId, i.isin));
       const drop = hi ? ((hi - q.price) * 100) / hi : 0;
       if (gain <= -risk.maxLoss) { lossAlert = Math.min(lossAlert ?? 0, gain); add(0, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}) : à examiner, pas de vente automatique.`, undefined, undefined, 4); }
       else if (p.horizon < 5 && gain > 0 && drop >= risk.trail) {
@@ -797,13 +814,16 @@ export function suggestions(s, today) {
       }
     }
     // concentration limit per line: above it, never « Renforcer », whatever the other signals say
-    const overCap = isHeld && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
+    const etf = /\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`); // a broad fund spreads its own risk: no limit per line
+    const overCap = isHeld && !etf && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
     if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`, undefined, undefined, 3);
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
-    const buyAt = /\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`) ? 1.5 : 2;
-    const action = notable.length || lossAlert != null ? 'À examiner'
-      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : score >= buyAt && !overCap && !bought ? 'Renforcer' : 'Conserver')
+    const buyAt = etf ? 1.5 : 2;
+    // 3. long term: price and news signals alone never sell, they ask for a look; risk rules and targets still act
+    const longSignal = isHeld && p.style !== 'actif' && !limitHit && !cooled && !cuts.length && score <= -2;
+    const action = notable.length || lossAlert != null || longSignal ? 'À examiner'
+      : isHeld ? (p.style === 'actif' && score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : score >= buyAt && !overCap && !bought ? 'Renforcer' : 'Conserver')
         : score >= buyAt ? 'Acheter' : 'Attendre';
     // everything the verdict merged, in one sentence
     const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
@@ -824,6 +844,7 @@ export function suggestions(s, today) {
     if (cooled && action === 'Conserver') order = none(10, `Aucune vente pour l’instant : ligne déjà allégée, prochaine révision le ${dayMonth(resume)}.`);
     if (bought && action === 'Conserver' && score >= buyAt) order = none(10, `Aucun renfort pour l’instant : ligne renforcée le ${dayMonth(bought)}, prochaine révision le ${dayMonth(buyResume)}.`);
     if (action === 'À examiner') order = notable.length ? none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.')
+      : lossAlert == null ? none(7, 'Signaux de baisse marqués : à examiner. En long terme, l’outil ne vend pas sur ces seuls signaux.')
       : none(4, `Aucune vente automatique : perte de ${pct(-lossAlert)}, au-delà de votre limite de ${risk.maxLoss} %. Regardez les résultats et les actualités de la société avant de décider.`);
     if (action === 'Vendre' || action === 'Alléger') {
       if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
@@ -844,6 +865,7 @@ export function suggestions(s, today) {
   const left = s.envelopes.filter(e => e.month === monthOf(today)).reduce((a, e) => a + envelopeLeft(s, e), 0);
   const signals = out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score);
   const spare = Object.fromEntries(s.accounts.map(a => [a.id, Math.max(0, balance(s, a))]));
+  const cushion = signals.length ? cushionMonths(s, today) : null;
   signals.forEach((pick, k) => {
     const env = k === 0 && left > 0, src = env ? 'Enveloppe du mois' : 'Espèces du compte';
     const rule = [...pick.reasons].filter(r => r.pts > 0).sort((a, b) => b.pts - a.pts)[0]?.rule ?? 7;
@@ -861,7 +883,7 @@ export function suggestions(s, today) {
       // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
       const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);
       // never buy so much that the line would pass the concentration limit
-      const room = p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
+      const room = !/\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`) && p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
       const pool = env ? (known ? Math.min(left, spare[a.id]) : left) : known ? Math.floor(spare[a.id] / (signals.length - k)) : 0;
       const aim = p.targets[i.isin] ?? 0, toTarget = !env && aim > 0 && aim < 100 && total ? Math.max(0, Math.round(((aim * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - aim / 100))) : Infinity; // new money also grows the total
       const titles = Object.keys(byIsin).length, sized = env ? Infinity : toTarget < Infinity ? toTarget : line ? Math.round((byIsin[i.isin] ?? 0) / 3) : titles ? Math.round(total / titles / 3) : Infinity;
@@ -895,6 +917,7 @@ export function suggestions(s, today) {
       const others = plans.filter(x => x.qty && x !== best);
       if (others.length) pick.reasons.push({ pts: 0, text: `Frais pour ce même montant ailleurs : ${others.map(x => `${x.a.name} ${euro(x.fees)}`).join(' · ')}.` });
     }
+    if (pick.order?.qty && cushion != null && cushion < 3) pick.order.text += ` · ⚠️ épargne de précaution : ${cushion.toFixed(1).replace('.', ',')} mois de dépenses (3 conseillés)`;
     const since = s.signalSince?.[pick.isin];
     if (pick.order?.qty && !(since?.action === pick.action && since.date < today)) Object.assign(pick.order, { pending: true, text: `À confirmer demain : ${pick.order.text}` });
   });

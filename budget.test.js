@@ -9,6 +9,7 @@ function base() {
   s.accounts.push({ id: 'a', name: 'BCP', institution: 'BCP', opening: 0, liquid: true, savings: false },
                   { id: 'b', name: 'Fortuneo', institution: 'Fortuneo', opening: 0, liquid: true, savings: false },
                   { id: 'l', name: 'Livret', institution: 'Fortuneo', opening: 0, liquid: false, savings: true });
+  s.settings.profile.maxWeight = 0; // these tests were written without a limit per line; the limit has its own tests
   return s;
 }
 const op = (s, kind, euros, extra = {}) => B.saveOp(s, { accountId: 'a', date: `${M}-02`, kind, cents: euros * 100, ...extra });
@@ -375,7 +376,10 @@ test('Verdict: risk limits of the profile on held titles — trailing stop sells
   B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
   B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'Alpha Vantage', T); // -12,9 % from its high, +4,5 % gain
   s.settings.profile.horizon = 3;
-  assert.equal(verdict(s, ETF).action, 'Vendre'); // below average (−1) + trailing stop (−2)
+  assert.equal(verdict(s, ETF).action, 'Alléger'); assert.equal(verdict(s, ETF).order.qty, 5); // long term: the trailing stop sells half, never everything
+  s.settings.profile.style = 'actif';
+  assert.equal(verdict(s, ETF).action, 'Vendre'); // active style: below average (−1) + trailing stop (−2) → everything
+  s.settings.profile.style = 'long';
   s.settings.profile.horizon = 10;
   assert.equal(verdict(s, ETF).action, 'Conserver');
   B.setQuote(s, ETF, 79, T); // −21 % vs cost, limit 20 % for « équilibré »
@@ -532,7 +536,7 @@ test('Notifications: a verdict is announced when it changes, budget alerts once 
   const s = withInstruments();
   B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
   B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'Alpha Vantage', T);
-  s.settings.profile.horizon = 3; // trailing stop → « Vendre »
+  s.settings.profile.horizon = 3; s.settings.profile.style = 'actif'; // trailing stop + falling trend → « Vendre » (active style)
   op(s, 'income', 1000); op(s, 'expense', 950); // 50 € left, under the 100 € threshold
   let p = B.pendingNotifications(s, T);
   assert.deepEqual(p.map(x => x.title), ['Vendre : World', 'Pouvoir d’achat presque atteint']);
@@ -861,7 +865,8 @@ test('Order: every sale says how many, on which account and under which rule', (
   let o = verdict(s, ETF).order;
   assert.deepEqual([o.side, o.qty, o.amount, o.rule], ['vente', 5, 52000, 5]);
   assert.match(o.text, /Vendre 5 parts sur Fortuneo/);
-  B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'test', T); // stop hit and below its average: everything goes
+  s.settings.profile.style = 'actif';
+  B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'test', T); // active style, stop hit and below its average: everything goes
   const v = verdict(s, ETF);
   assert.equal(v.action, 'Vendre'); assert.equal(v.order.qty, 10); assert.equal(v.order.rule, 7); // the rule that says « tout vendre »
 });
@@ -1043,4 +1048,39 @@ test('Backtest: the real rules replayed day by day, against keeping the title', 
   [r] = B.backtest(s);
   assert.ok(r.trades >= 1); assert.ok(r.rules > r.hold + 5, `rules ${r.rules} vs hold ${r.hold}`); // the trailing stop kept part of the gain
   assert.deepEqual(B.backtest(withInstruments()), []); // no prices, no test
+});
+
+test('Lot 1: trailing stop from the high since purchase, 10 % per stock by default, long term never sells on signals, safety savings', () => {
+  // a high reached before buying no longer triggers the trailing stop
+  const s = withInstruments(); s.settings.profile.horizon = 3;
+  const h = Array.from({ length: 250 }, (_, k) => [dateBack(249 - k), k < 50 ? 150 - k * 0.8 : k < 240 ? 110 : 100 + (k - 240)]); h[249] = [T, 110];
+  B.setHistory(s, ETF, h, 't', T);
+  B.addPurchase(s, { accountId: 'b', isin: ETF, date: dateBack(7), qty: 10, cents: 100000 });
+  let v = verdict(s, ETF);
+  assert.ok(!v.reasons.some(r => r.rule === 5)); assert.notEqual(v.order.side, 'vente');
+  assert.equal(B.linePlan(s, T, ETF)[0].trailAt, Math.round(110 * 0.88 * 100) / 100); // from the 110 € reached after buying
+  // default limit, ETFs exempt
+  assert.equal(B.emptyState().settings.profile.maxWeight, 10);
+  const old = B.emptyState(); delete old.settings.profile.maxWeight;
+  assert.equal(B.validateState(old).settings.profile.maxWeight, 10);
+  const e = withInstruments(); e.settings.profile.maxWeight = 10;
+  B.saveInstrument(e, { isin: CW8, name: 'Amundi MSCI World UCITS ETF', currency: 'EUR', type: 'ETF' });
+  B.addHolding(e, 'b', CW8, '2025-01-01', 10, 500000); B.setHistory(e, CW8, closes(560, 0.5), 't', T);
+  e.signalSince = { [CW8]: { action: 'Renforcer', date: dateBack(1) } }; e.accounts.find(a => a.id === 'b').opening = 1000000;
+  v = verdict(e, CW8);
+  assert.equal(v.action, 'Renforcer'); assert.ok(v.order.qty > 0); // 100 % of the portfolio, but an ETF: not limited
+  // long term: strong falling signals ask for a look, they do not sell
+  const f = withInstruments();
+  B.addHolding(f, 'b', ETF, '2025-01-01', 10, 100000);
+  B.setHistory(f, ETF, closes(110, -0.3), 't', T);
+  f.news.push(...['a', 'b'].map(u => ({ isin: ETF, title: 'x', url: `https://e.com/${u}`, source: 'e', publishedAt: T, sentiment: -0.6 })));
+  v = verdict(f, ETF);
+  assert.equal(v.action, 'À examiner'); assert.equal(v.order.side, null); assert.equal(v.order.rule, 7);
+  f.settings.profile.style = 'actif';
+  assert.equal(verdict(f, ETF).order.side, 'vente');
+  // buying with less than 3 months of safety savings is flagged
+  const c = p03(500000);
+  for (const m of ['2026-08', '2026-09', '2026-10']) B.saveOp(c, { accountId: 'a', date: `${m}-05`, kind: 'expense', cents: 100000, label: 'Loyer' });
+  c.accounts.find(a => a.id === 'l').opening = 150000;
+  assert.match(verdict(c, CW8).order.text, /épargne de précaution : 1,5 mois/);
 });
