@@ -1143,3 +1143,11 @@ test('Funds are recognised by their index name too', () => {
   for (const n of ['iShares Core MSCI World', 'Amundi PEA S&P 500 (PSP5)', 'Amundi MSCI World (CW8)', 'AMUNDI PEA MONDE (MSCI World) UCITS ETF']) assert.ok(B.isFund({ name: n }), n);
   for (const n of ['TotalEnergies', 'Apple', 'World', 'Safran']) assert.ok(!B.isFund({ name: n }), n);
 });
+
+test('Orders carry their limit price for the plain « À faire » list', () => {
+  const s = withInstruments(); s.settings.profile.horizon = 3;
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 90000);
+  const h = closes(100, 0); h[50] = [h[50][0], 120]; h[99] = [T, 104]; B.setHistory(s, ETF, h, 'test', T);
+  const o = verdict(s, ETF).order;
+  assert.equal(o.limit, 103.48); assert.equal(o.cur, 'EUR'); assert.equal(B.limitPrice('achat', 561.2), 564.01);
+});

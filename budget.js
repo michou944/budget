@@ -712,10 +712,8 @@ const SALE_PAUSE = 30, dayMonth = d => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
 // shortcut: flat tax of 2026 on gains realised on a CTO (income tax + social levies), to check against the law and one's own case
 export const CTO_TAX = 31.4;
 // A limit order a little above (buy) or below (sell) the last price: never pay a wide gap between buyers and sellers.
-const limitOrder = (side, price, cur) => {
-  const d = price < 1 ? 4 : 2, f = 10 ** d, lim = side === 'achat' ? Math.ceil(price * 1.005 * f) / f : Math.floor(price * 0.995 * f) / f;
-  return `Ordre à cours limité à ${lim.toFixed(d).replace('.', ',')} ${cur} ${side === 'achat' ? 'maximum' : 'minimum'}, valable 1 semaine.`;
-};
+export const limitPrice = (side, price) => { const f = 10 ** (price < 1 ? 4 : 2); return side === 'achat' ? Math.ceil(price * 1.005 * f) / f : Math.floor(price * 0.995 * f) / f; };
+const limitOrder = (side, price, cur) => `Ordre à cours limité à ${limitPrice(side, price).toFixed(price < 1 ? 4 : 2).replace('.', ',')} ${cur} ${side === 'achat' ? 'maximum' : 'minimum'}, valable 1 semaine.`;
 const inDays = (today, n) => dayMonth(new Date(Date.parse(today) + n * 864e5).toISOString().slice(0, 10));
 
 // Broad index funds, judged by the same rules as any idea. Added once: one you stop following stays gone.
@@ -902,7 +900,7 @@ export function suggestions(s, today) {
           : x.gain > 0 ? `${x.name} : impôt estimé ≈ ${euro(Math.round((x.gain * CTO_TAX) / 100))} sur ${euro(x.gain)} de plus-value (${String(CTO_TAX).replace('.', ',')} %, à vérifier), frais ≈ ${euro(x.fee)} : il vous reste ≈ ${euro(x.amount - Math.round((x.gain * CTO_TAX) / 100) - x.fee)}.`
             : x.gain < 0 ? `${x.name} : moins-value de ${euro(-x.gain)}, déductible de vos plus-values de cette année et des 10 suivantes.` : '')),
         cut.share < 1 ? `Ensuite, pause sur cette ligne jusqu’au ${inDays(today, SALE_PAUSE)} (règle 10).` : ''].filter(Boolean).join(' ');
-      order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule, how,
+      order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule, how, limit: limitPrice('vente', q.price), cur: i.currency,
         text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
       const was = s.signalSince?.[i.isin];
       if (cut.rule === 7 && !limitHit && !(was?.action === action && was.date < today)) Object.assign(order, { pending: true, text: `À confirmer demain : ${order.text}` });
@@ -968,6 +966,7 @@ export function suggestions(s, today) {
       if (others.length) pick.reasons.push({ pts: 0, text: `Frais pour ce même montant ailleurs : ${others.map(x => `${x.a.name} ${euro(x.fees)}`).join(' · ')}.` });
     }
     if (pick.order?.qty && cushion != null && cushion < 3) pick.order.text += ` · ⚠️ épargne de précaution : ${cushion.toFixed(1).replace('.', ',')} mois de dépenses (3 conseillés)`;
+    if (pick.order?.qty) Object.assign(pick.order, { limit: limitPrice('achat', price), cur: i.currency });
     if (pick.order?.qty) pick.order.how = `${limitOrder('achat', price, i.currency)} Ensuite, pas de nouveau renfort avant le ${inDays(today, SALE_PAUSE)} (règle 10).`;
     const since = s.signalSince?.[pick.isin];
     if (pick.order?.qty && !(since?.action === pick.action && since.date < today)) Object.assign(pick.order, { pending: true, text: `À confirmer demain : ${pick.order.text}` });
@@ -993,7 +992,7 @@ function monthlyPlan(s, today, out, lines, byIsin, isEtf) {
   const qty = a.fractional ? Math.max(0, Math.floor(((p.monthly - fee) / unit) * 1000) / 1000) : Math.max(0, Math.floor((p.monthly - fee) / unit));
   const amount = qty ? Math.round(qty * unit) + fee : 0, cash = balance(s, a), funded = cash >= amount;
   core.order = qty
-    ? { side: 'achat', qty, amount, accountId: a.id, rule: 13, funded, monthly: true, how: `${limitOrder('achat', price, i.currency)} Puis plus rien sur cet ETF ce mois-ci.`,
+    ? { side: 'achat', qty, amount, accountId: a.id, rule: 13, funded, monthly: true, limit: limitPrice('achat', price), cur: i.currency, how: `${limitOrder('achat', price, i.currency)} Puis plus rien sur cet ETF ce mois-ci.`,
       text: `Versement du mois : acheter ${parts(qty)} de ${i.name} sur ${a.name} (≈ ${euro(amount)}, frais inclus)${funded ? '' : ` : il manque ${euro(amount - cash)} d’espèces`}` }
     : { side: null, qty: 0, rule: 13, text: `Versement du mois : ${euro(p.monthly)} ne suffisent pas pour une part de ${i.name} (${euro(unit + fee)} avec les frais).` };
 }

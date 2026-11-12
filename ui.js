@@ -113,6 +113,17 @@ function sheet() {
   const st = S.settings, a = id && S.accounts.find(x => x.id === id);
   const body = {
     op: opSheet,
+    done: () => {
+      const x = B.suggestions(S, today()).find(y => y.isin === id), o = x?.order, i = S.instruments.find(y => y.isin === id);
+      if (!o?.qty || !i) return `<h2>Rien à enregistrer</h2>${cancelBtn}`;
+      const rows = o.side === 'vente' ? o.sells.map(v => ({ ...v, amount: v.amount - (v.fee ?? 0) })) : [{ accountId: o.accountId, qty: o.qty, amount: o.amount }];
+      return `<h2>${o.side === 'vente' ? 'J’ai vendu' : 'J’ai acheté'} : ${esc(i.name)}</h2><form data-form="done"><input type="hidden" name="isin" value="${esc(id)}">`
+        + `<input type="hidden" name="side" value="${o.side}"><input type="hidden" name="action" value="${esc(x.action)}"><input type="hidden" name="rule" value="${o.rule}">`
+        + rows.map(r => `<div class="day">${esc(accTag(r.accountId))}</div><div class="grid2"><label>Parts<input name="q_${esc(r.accountId)}" inputmode="decimal" value="${num(r.qty)}"></label>`
+          + `<label>${o.side === 'vente' ? 'Montant reçu' : 'Montant payé, frais inclus'} (€)<input name="a_${esc(r.accountId)}" inputmode="decimal" value="${euros(r.amount)}"></label></div>`).join('')
+        + `<label>Date<input type="date" name="date" value="${today()}" required></label>`
+        + `${empty('Rempli avec le conseil : corrigez avec les chiffres de votre courtier si besoin. Les espèces du compte se mettent à jour toutes seules.')}<button>Enregistrer</button>${cancelBtn}</form>`;
+    },
     account: () => {
       const t = !a ? 'courant' : accType(a);
       const pctVal = v => (v != null ? String(v).replace('.', ',') : '');
@@ -335,12 +346,19 @@ const views = {
     const signOf = r => (r.pts > 0 ? '<b class="good">+</b>' : r.pts < 0 ? '<b class="bad">−</b>' : '<span class="muted">•</span>');
     const meta = r => (r.asOf || r.source ? ` <span class="muted">· ${[r.asOf, r.source].filter(Boolean).map(esc).join(' · ')}</span>` : '');
 
+    const plainOrder = x => {
+      const o = x.order;
+      if (!o?.side || !o.qty || o.pending || (o.side === 'achat' && !o.funded)) return null;
+      return (o.side === 'vente' ? o.sells.map(v => `Vendre ${num(v.qty)} part${v.qty > 1 ? 's' : ''} sur ${esc(accTag(v.accountId))}`).join(' et ')
+        : `Acheter ${num(o.qty)} part${o.qty > 1 ? 's' : ''} sur ${esc(accTag(o.accountId))}`)
+        + (o.limit != null ? ` · prix ${o.side === 'vente' ? 'minimum' : 'maximum'} ${num(o.limit)} ${esc(o.cur)}` : '');
+    };
     const titleRow = x => {
       const ls = lines.filter(l => l.isin === x.isin), q = S.quotes[x.isin], i = inst(x.isin);
       const gain = ls.reduce((a, l) => a + (l.gain ?? 0), 0);
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accTag(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
-        + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.funded && !x.order.pending ? 'good' : 'warn'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
+        + (plainOrder(x) ? `<div class="${x.order.side === 'vente' ? 'bad' : 'good'}"><b>👉 ${plainOrder(x)}</b></div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
@@ -351,8 +369,11 @@ const views = {
       const q = S.quotes[isin], news = B.newsFor(S, isin), noOps = !S.ops.some(o => o.isin === isin) && !lines.some(l => l.isin === isin);
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
         priceChart(isin, i.currency)
+        + `<div class="day">✅ Que faire</div><div class="${plainOrder(x) ? (x.order.side === 'vente' ? 'bad' : 'good') : ''}"><b>${plainOrder(x) ?? esc(x.order.text)}</b></div>`
+        + (plainOrder(x) ? `<div style="margin:6px 0">${btn('panel', `done:${isin}`, '✅ C’est fait', 'small')}</div>` : '')
+        + '<details style="margin-top:8px"><summary><b>Pourquoi ?</b> <span class="muted">règles, calculs, impôt estimé</span></summary>'
         + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
-        + ((r => `<div class="day">🎯 Conclusion</div><div><b>${esc(x.order.text)}</b></div>${x.order.how ? `<div class="muted">${esc(x.order.how)}</div>` : ''}${x.order.side === 'achat' && x.order.qty ? `<div style="margin:6px 0">${btn('follow', isin, '✅ Je l’ai acheté', 'small')}</div>` : ''}${x.facts ? `<div>Bilan : ${esc(x.facts)}.</div>` : ''}${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
+        + ((r => `<div class="day">🎯 Conclusion</div><div><b>${esc(x.order.text)}</b></div>${x.order.how ? `<div class="muted">${esc(x.order.how)}</div>` : ''}${x.facts ? `<div>Bilan : ${esc(x.facts)}.</div>` : ''}${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
         + ((ps => (ps.length ? '<div class="day">📋 Mon plan</div>' + ps.map(pl => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${esc(accTag(pl.accountId))}</b>`
           + `<div>${pl.last ? `Dernier achat le ${shortDate(pl.last.date)} à ${eur(pl.last.perPart)} la part${pl.last.advice ? `, sur avis « ${esc(pl.last.advice.action)} » (règle ${pl.last.advice.rule})` : ', saisi sans avis de l’outil'}` : 'Position déclarée ou importée'}`
           + `${pl.sinceBuy != null ? ` · depuis : ${pl.sinceBuy >= 0 ? '+' : ''}${pl.sinceBuy.toFixed(1).replace('.', ',')} %` : ''}</div>`
@@ -361,6 +382,7 @@ const views = {
           const rs = x.reasons.filter(keep);
           return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}${r.rule ? ` <span class="tag">Règle ${r.rule}</span>` : ''}</span></div>`).join('') : '';
         }).join('')
+        + '</details>'
         + '<div class="day">📰 Actualités</div>'
         + (news.map(n => `<div class="op${B.isOldNews(n, t) ? ' old' : ''}"><div class="l"><a href="${esc(n.url)}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>`
           + `<div class="muted">${esc(n.source)} · ${n.publishedAt}${Number.isFinite(n.sentiment) ? ` · ton ${n.sentiment > 0.2 ? 'positif' : n.sentiment < -0.2 ? 'négatif' : 'neutre'}` : ''}</div></div></div>`).join('') || empty('Aucune actualité sur les 14 derniers jours.'))
@@ -442,12 +464,16 @@ const views = {
         + (!ready ? empty('Onglet « Plus » → « Réglages bourse » : 5 minutes de configuration, une seule fois.') : '')
         + (view.refreshing ? empty('⏳ Actualisation des cours, actualités et avis…') : lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
         + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '') + '</section>'
-      + ((todo, odd, gone) => card('🎯 Conclusion du jour', (todo.length || odd.length ? [...todo, ...odd].map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}<div class="${x.order.side === 'vente' ? 'bad' : x.order.side === 'achat' && (!x.order.funded || x.order.pending) ? 'warn' : x.order.side ? 'good' : 'muted'}"><b>${esc(x.order.text)}</b></div>${x.order.how ? `<div style="font-size:13px">${esc(x.order.how)}</div>` : ''}<div class="muted">${esc(x.facts ?? '')}</div></div></div>`).join('')
-          : empty(lines.length ? 'Aucune opération aujourd’hui : vos règles ne déclenchent ni achat ni vente.' : 'Aucune opération proposée pour l’instant.'))
-        + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
-        + (gone ? `<div class="warn">${gone} titre(s) sans conclusion : cours manquant ou périmé.</div>` : '')
-        + empty(`Calcul fusionnant cours, tendance, actualités, vos limites et vos parts visées. Les résultats des sociétés ne sont pas analysés. ${B.DISCLAIMER}`)))(
-        [...sug.filter(x => x.order?.side === 'vente'), ...sug.filter(x => x.order?.side === 'achat' && x.order.qty)], sug.filter(x => x.action === 'À examiner'), sug.filter(x => x.suspended && x.held).length)
+      + ((doable, look, soon, fix) => card('✅ À faire aujourd’hui',
+        (fix.length ? `<div class="warn"><b>À corriger d’abord</b>${fix.map(c => `<div style="font-size:13px">• ${esc(c)}</div>`).join('')}</div>` : '')
+        + (doable.length ? doable.map(x => `<div class="op"><div class="l"><b>${esc(x.name)}</b><div class="${x.order.side === 'vente' ? 'bad' : 'good'}"><b>${plainOrder(x)}</b></div>`
+          + `<div style="margin-top:6px;display:flex;gap:8px">${btn('panel', `done:${x.isin}`, '✅ C’est fait', 'small')}${btn('inst', x.isin, 'Pourquoi ?', 'small ghost')}</div></div></div>`).join('')
+          : `<div style="padding:8px 0"><b class="good">Rien à faire aujourd’hui ✓</b></div>`)
+        + (look.length ? '<div class="day">À regarder</div>' + look.map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b><div class="muted">${esc(x.order.text)}</div></div></div>`).join('') : '')
+        + (soon ? empty(`${soon} achat(s) ou vente(s) à confirmer demain, si le signal tient.`) : '')
+        + empty(`Suivre ces actions garde vos comptes justes : touchez « C’est fait » une fois l’ordre passé chez votre courtier. ${B.DISCLAIMER}`)))(
+        sug.filter(plainOrder), sug.filter(x => !plainOrder(x) && (x.action === 'À examiner' || (x.order?.side === 'achat' && x.order.qty && !x.order.funded && !x.order.pending))),
+        sug.filter(x => x.order?.pending).length, B.checks(S, t).filter(c => /espèces négatives|pas à jour|prix d’achat/.test(c)))
       : tab === 'titles' ? ''
       + card('Mes positions', (sug.filter(x => x.held).map(titleRow).join('') || empty('Aucune position. Importez un relevé courtier (onglet « Plus ») ou saisissez un achat ci-dessous.'))
         + (lines.length ? row('Valeur des positions', total(lines), 'total') : '')
@@ -859,6 +885,16 @@ const forms = {
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
   move: f => B.moveHolding(S, f.isin, f.from, f.to),
+  done: f => {
+    for (const k of Object.keys(f).filter(k => k.startsWith('q_'))) {
+      const acc = k.slice(2), qty = Number(String(f[k]).replace(/\s/g, '').replace(',', '.'));
+      if (!(qty > 0)) continue; // a quantity set to 0: that account is skipped
+      const cents = positive(f[`a_${acc}`]);
+      if (f.side === 'vente') B.addSale(S, acc, f.isin, f.date, qty, cents);
+      else B.addPurchase(S, { accountId: acc, isin: f.isin, date: f.date, qty, cents, advice: { action: f.action, rule: +f.rule } });
+    }
+    view.sheet = false;
+  },
   purchase: f => {
     const x = B.suggestions(S, today()).find(y => y.isin === String(f.isin).trim().toUpperCase()); // the advice in force, kept with the purchase
     view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount), advice: x && ['Acheter', 'Renforcer'].includes(x.action) ? { action: x.action, rule: x.order.rule } : undefined });
