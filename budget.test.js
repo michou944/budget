@@ -995,3 +995,14 @@ test('Strategy report: result of the titles against the same money at the same d
   delete s.history[CW8];
   assert.equal(B.strategyReport(s, T).bench, null);
 });
+
+test('Checks: what makes the figures wrong, and the five years of the PEA', () => {
+  const s = withInstruments(); s.accounts.push({ id: 'p', name: 'PEA F', institution: 'Fortuneo', opening: 0, type: 'PEA' });
+  B.addPurchase(s, { accountId: 'p', isin: ETF, date: T, qty: 1, cents: 10000 }); // no cash entered, no price yet
+  const c = B.checks(s, T).join('\n');
+  assert.match(c, /PEA F : espèces négatives/); assert.match(c, /World \(PEA F\) : compté au prix d’achat/); assert.match(c, /PEA F : indiquez sa date d’ouverture/);
+  assert.doesNotMatch(c, /Livret : aucun mouvement/); // savings may rest
+  s.accounts.find(a => a.id === 'p').opened = '2023-03-12';
+  assert.equal(B.peaFiveYears(s.accounts.find(a => a.id === 'p')), '2028-03-12');
+  assert.doesNotMatch(B.checks(s, T).join('\n'), /date d’ouverture/);
+});

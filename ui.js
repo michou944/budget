@@ -93,6 +93,8 @@ const accType = a => (a.savings ? (ACC_TYPES[a.sub] ? a.sub : guessSub(a.name) ?
 // « Fortuneo · PEA »: the name, plus the envelope when the name does not say it
 const accTag = id => { const a = S.accounts.find(x => x.id === id); if (!a) return '?'; const k = accKind(a), t = k === 'pea' ? 'PEA' : k === 'cto' ? 'CTO' : '';
   return t && !a.name.toUpperCase().includes(t) ? `${a.name} · ${t}` : a.name; };
+// the PEA's five years: before, taking money out generally closes it
+const peaLine = a => { const f = accKind(a) === 'pea' && B.peaFiveYears(a); return !f ? '' : f <= today() ? ' · PEA de plus de 5 ans ✓' : ` · 5 ans le ${f.split('-').reverse().join('/')} : d’ici là, ne retirez pas d’argent`; };
 const byBank = list => [...list].sort((x, y) => x.institution.localeCompare(y.institution, 'fr') || x.name.localeCompare(y.name, 'fr'));
 // one journal entry: decision, price then → now, and whether it went the way the decision bet on
 const decisionRow = (d, withName) => `<div class="op"><div class="l"><b>${esc(d.verdict ?? B.DECISIONS[d.action])}</b>${withName ? ` · ${esc(S.instruments.find(i => i.isin === d.isin)?.name ?? d.isin)}` : ''}`
@@ -123,6 +125,7 @@ function sheet() {
         ${empty('Un PEA ou un CTO comprend ses titres et son compte espèces : les achats de titres et ses espèces vont sur ce même compte.')}
         <label>Nom <span class="muted">(facultatif)</span><input name="name" value="${esc(a?.name)}" placeholder="par défaut : banque + type, ex. Fortuneo PEA"></label>
         <label>Solde de départ (€)<input name="opening" inputmode="decimal" value="${a ? euros(a.opening) : ''}" placeholder="0"></label>
+        <label>Date d’ouverture <span class="muted">(PEA : pour suivre ses 5 ans)</span><input type="date" name="opened" value="${esc(a?.opened ?? '')}"></label>
         <details${a?.type ? ' open' : ''}><summary class="muted">Bourse : frais du courtier</summary><div style="display:grid;gap:10px;margin-top:10px">
         <div class="grid2"><label>Par ordre (€)<input name="feeFixed" inputmode="decimal" value="${a?.feeFixed != null ? pctVal(a.feeFixed / 100) : ''}"></label><label>En % du montant<input name="feePct" inputmode="decimal" value="${pctVal(a?.feePct)}"></label></div>
         <label>Change hors euro (%)<input name="fxPct" inputmode="decimal" value="${pctVal(a?.fxPct)}"></label>
@@ -250,7 +253,7 @@ function spendCard(m) {
 // ---- views ----
 const views = {
   dash() {
-    const m = view.month, st = B.monthStats(S, m), al = B.alerts(S, m), up = B.upcoming(S, m), stale = B.staleAccounts(S, today());
+    const m = view.month, st = B.monthStats(S, m), al = B.alerts(S, m), up = B.upcoming(S, m), todo = B.checks(S, today());
     const thisMonth = m === B.monthOf(today()), pct = st.income ? Math.min(100, Math.round((st.spent * 100) / st.income)) : 0;
     const paid = S.ops.filter(o => !o.planned && B.monthOf(o.date) === m && o.kind === 'expense').sort((a, b) => b.date.localeCompare(a.date));
     const aside = [st.reserve && `épargne prévue ${eur(st.reserve)}`, st.stock && `bourse ${eur(st.stock)}`].filter(Boolean);
@@ -278,7 +281,7 @@ const views = {
         const open = k => (view.open.has(k) ? ' open' : '');
         // PEA / CTO: titles valued on one side, the cash account on the other, its amount typed right here
         const invest = x => { const v = tot(x), k = `acc:${x.id}`;
-          return `<details class="tree" data-fold="${esc(k)}"${open(k)}><summary><span>${ACC_TYPES[accType(x)][0]} ${esc(x.name)}<div class="muted">${ACC_TYPES[accType(x)][1]}</div></span><b>${eur(v.total)}</b></summary>`
+          return `<details class="tree" data-fold="${esc(k)}"${open(k)}><summary><span>${ACC_TYPES[accType(x)][0]} ${esc(x.name)}<div class="muted">${ACC_TYPES[accType(x)][1]}${peaLine(x)}</div></span><b>${eur(v.total)}</b></summary>`
             + `<div class="day">📊 Valorisation des titres · ${eur(v.securities)}</div>`
             + (vals.filter(l => l.accountId === x.id).map(l => `<div class="row"><span>${esc(l.inst.name)} <span class="muted">· ${num(l.qty)} part(s)${l.value == null ? ' · au prix d’achat' : ` × ${num(l.quote.price)} ${esc(l.inst.currency)}${l.fx ? ` ÷ ${num(l.fx.rate)}` : ''} · ${shortDate(l.quote.asOf)}`}</span></span>${eur(l.value ?? l.cost)}</div>`).join('') || empty('Aucun titre sur ce compte.'))
             + ((ls => (ls.some(l => l.value == null) ? `<div class="warn">${ls.filter(l => l.value == null).length} ligne(s) comptée(s) au prix d’achat : cours absent ou à vérifier.</div>` : '')
@@ -291,7 +294,7 @@ const views = {
             + as.map(x => (['pea', 'cto'].includes(accKind(x)) ? invest(x) : account(x))).join('') + '</details>';
         }).join('') || empty('Aucun compte : créez-en dans Réglages.');
       })())
-      + (stale.length ? `<div class="banner warn"><span>🕒 ${stale.length} compte(s) sans mouvement depuis 30 jours : ${stale.map(x => esc(x.a.name)).join(', ')}</span></div>` : '')
+      + (todo.length ? `<section class="card"><h2>🔎 À vérifier · ${todo.length}</h2>${todo.map(c => `<div class="muted" style="padding:4px 0">• ${esc(c)}</div>`).join('')}</section>` : '')
       + fab();
   },
 
@@ -600,7 +603,7 @@ const views = {
     const t = today(), banks = [...new Set(byBank(S.accounts).map(a => a.institution))];
     return card('Mes comptes', banks.map(b => { const as = byBank(S.accounts).filter(a => a.institution === b);
       return `<div class="day">🏛️ ${esc(b)} · ${eur(as.reduce((n, a) => n + B.accountTotal(S, a, t).total, 0))}</div>` + as.map(a => { const k = accType(a), v = B.accountTotal(S, a, t);
-        return item(`account:${a.id}`, ACC_TYPES[k][0], esc(a.name), ['pea', 'cto'].includes(k) ? `${ACC_TYPES[k][1]} · titres ${eur(v.securities)} · espèces ${eur(v.cash)}` : ACC_TYPES[k][1], money(v.total)); }).join(''); }).join('')
+        return item(`account:${a.id}`, ACC_TYPES[k][0], esc(a.name), ['pea', 'cto'].includes(k) ? `${ACC_TYPES[k][1]} · titres ${eur(v.securities)} · espèces ${eur(v.cash)}${peaLine(a)}` : ACC_TYPES[k][1], money(v.total)); }).join(''); }).join('')
         + item('account:', '＋', '<b style="color:var(--accent)">Ajouter un compte</b>', ''))
       + card('Budget', item('budget:', '🎯', 'Épargne, plafond et alertes', `${eur(st.reserve)} mis de côté par mois · alerte sous ${eur(st.lowSpendable)}`)
         + item('rec:', '🔁', 'Échéances récurrentes', S.recurring.length ? S.recurring.map(r => esc(r.label)).join(', ') : 'loyer, abonnements, salaire…')
@@ -850,7 +853,7 @@ const forms = {
     const pctOrNone = v => { if (!String(v ?? '').trim()) return undefined; const x = Number(String(v).replace(',', '.')); if (!(x >= 0 && x <= 20)) throw new Error('Pourcentage de frais invalide'); return x; };
     const t = ACC_TYPES[f.acctype] ? f.acctype : 'courant', savings = !['courant', 'pea', 'cto'].includes(t);
     const a = { name: f.name.trim() || `${f.institution.trim()} ${ACC_TYPES[t][1].replace(/ \(CTO\)$/, '')}`, institution: f.institution.trim(), opening: parseEur(f.opening),
-      liquid: t === 'courant', savings, sub: savings && t !== 'epargne' ? t : undefined, fractional: f.fractional === 'on',
+      liquid: t === 'courant', savings, sub: savings && t !== 'epargne' ? t : undefined, opened: f.opened || undefined, fractional: f.fractional === 'on',
       type: t === 'cto' ? 'CTO' : t === 'pea' ? 'PEA' : undefined, feeFixed: String(f.feeFixed ?? '').trim() ? parseEur(f.feeFixed) : undefined, feePct: pctOrNone(f.feePct), fxPct: pctOrNone(f.fxPct) };
     if (a.feeFixed < 0) throw new Error('Frais invalides');
     if (f.id) Object.assign(S.accounts.find(x => x.id === f.id), a); else S.accounts.push({ id: B.uid(), ...a });

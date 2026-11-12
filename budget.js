@@ -113,6 +113,24 @@ export function staleAccounts(s, today, maxDays = 30) {
     .filter(x => !x.last || dayNum(today) - dayNum(x.last) > maxDays);
 }
 
+// PEA: five years after its opening date, withdrawals no longer close it (YYYY-MM-DD, or null without a date).
+export const peaFiveYears = a => (a.opened ? `${+a.opened.slice(0, 4) + 5}${a.opened.slice(4)}` : null);
+
+// What makes the figures wrong, said plainly, until it is fixed.
+export function checks(s, today) {
+  const out = [], name = id => s.accounts.find(a => a.id === id)?.name ?? '?', late = new Set();
+  const invest = s.accounts.filter(a => ['PEA', 'CTO'].includes(a.type) || s.ops.some(o => o.kind === 'invest' && o.accountId === a.id));
+  for (const a of invest) { const c = balance(s, a); if (c < 0) out.push(`${a.name} : espèces négatives (${euro(c)}). Indiquez le montant affiché par la banque.`); }
+  for (const l of valuation(s, today)) {
+    if (l.value == null) out.push(`${l.inst.name} (${name(l.accountId)}) : compté au prix d’achat, cours absent ou à vérifier.`);
+    else if (l.stale && !late.has(l.isin)) { late.add(l.isin); out.push(`${l.inst.name} : cours du ${l.quote?.asOf ?? '?'}, pas à jour.`); }
+  }
+  for (const a of s.accounts) if (a.type === 'PEA' && !a.opened) out.push(`${a.name} : indiquez sa date d’ouverture pour suivre les 5 ans du PEA.`);
+  // a savings or brokerage account can rest for months: only current accounts are expected to move
+  for (const x of staleAccounts(s, today)) if (x.a.liquid && !invest.includes(x.a)) out.push(`${x.a.name} : aucun mouvement depuis 30 jours. Importez un relevé ou vérifiez le solde.`);
+  return out;
+}
+
 // ---- operations ----
 
 export function saveOp(s, f, id) {
