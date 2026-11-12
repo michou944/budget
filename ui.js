@@ -173,7 +173,7 @@ function sheet() {
         <button>Télécharger une sauvegarde chiffrée</button></form>
         <form data-form="restore" style="margin-top:16px"><div class="muted">Restaurer une sauvegarde (remplace les données de ce téléphone)</div><input type="file" name="file" accept=".json,application/json" required>
         <input type="password" name="pw" placeholder="Mot de passe de la sauvegarde" autocomplete="current-password" required><button class="ghost">Restaurer</button></form>
-        <div style="margin-top:16px;display:grid;gap:10px">${btn('csv', '', 'Exporter les mouvements (CSV, pour Excel)', 'ghost')}${cancelBtn}</div>`,
+        <div style="margin-top:16px;display:grid;gap:10px">${btn('csv', '', 'Exporter les mouvements (CSV, pour Excel : lecture seule, ne sert pas à restaurer)', 'ghost')}${cancelBtn}</div>`,
   }[kind]?.();
   return body ? `<div class="sheet-bg" data-act="closeSheet"></div><div class="sheet" role="dialog"><div class="grip"></div>${body}</div>` : '';
 }
@@ -717,7 +717,7 @@ const actions = {
   dismiss: ids => S.dismissedAlerts.push(...ids.split(',')),
   goOps: () => { view.tab = 'ops'; scrollTo(0, 0); },
   period: p => { view.period = p; },
-  delRec: id => { S.recurring = S.recurring.filter(r => r.id !== id); },
+  delRec: id => B.deleteRecurring(S, id),
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
   stockTab: k => { view.stockTab = k; scrollTo(0, 0); },

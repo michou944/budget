@@ -1151,3 +1151,51 @@ test('Orders carry their limit price for the plain « À faire » list', () => {
   const o = verdict(s, ETF).order;
   assert.equal(o.limit, 103.48); assert.equal(o.cur, 'EUR'); assert.equal(B.limitPrice('achat', 561.2), 564.01);
 });
+
+test('Budget audit: a skipped month stays skipped, a stopped recurring takes its coming dates', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'BCP', opening: 100000, liquid: true });
+  s.recurring.push({ id: 'r', accountId: 'a', day: 5, cents: 1599, kind: 'expense', categoryId: null, label: 'Netflix' });
+  B.generateRecurring(s, '2026-12'); B.deleteOp(s, s.ops.find(o => o.recurringId === 'r').id); B.generateRecurring(s, '2026-12');
+  assert.ok(!s.ops.some(o => o.recurringId === 'r'));
+  B.generateRecurring(s, '2027-01'); assert.equal(s.ops.length, 1); // the next month still comes
+  B.saveOp(s, { accountId: 'a', date: '2026-11-05', kind: 'expense', cents: 1599, label: 'Netflix' }); // a past payment stays
+  B.deleteRecurring(s, 'r');
+  assert.equal(s.recurring.length, 0); assert.deepEqual(s.ops.map(o => o.label), ['Netflix']); assert.ok(!s.ops[0].planned);
+});
+
+test('Budget audit: imported refund and internal transfer are not income', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'BCP', opening: 100000, liquid: true }, { id: 'l', name: 'Livret A', opening: 0, savings: true });
+  const cat = s.categories[1].id;
+  B.saveOp(s, { accountId: 'a', date: '2026-11-02', kind: 'expense', cents: 5000, label: 'AMAZON EU', categoryId: cat });
+  B.importRows(s, 'a', B.importPreview(s, 'a', [{ date: '2026-11-10', amount: 2000, label: 'AMAZON EU REMBOURSEMENT' }, { date: '2026-11-12', amount: -30000, label: 'VIR LIVRET A' }]), T);
+  B.importRows(s, 'l', B.importPreview(s, 'l', [{ date: '2026-11-13', amount: 30000, label: 'VIR DEPUIS BCP' }, { date: '2026-11-14', amount: 1000, label: 'SALAIRE ACME' }]), T);
+  const m = B.monthStats(s, '2026-11');
+  assert.deepEqual([m.income, m.spent], [1000, 3000]); // salary only; 50 € spent − 20 € refunded; the transfer is neither
+  assert.equal(s.ops.find(o => /REMBOURSEMENT/.test(o.label)).categoryId, cat);
+  assert.equal(s.ops.filter(o => o.kind === 'transfer').length, 2);
+});
+
+test('Budget audit: transfers imported before are linked once on load, manual ones are not touched', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'BCP', opening: 0, liquid: true }, { id: 'l', name: 'Livret A', opening: 0, savings: true });
+  s.ops.push({ id: '1', accountId: 'a', date: '2026-11-12', amount: -30000, kind: 'expense', categoryId: null, label: 'VIR', importKey: 'k1' },
+    { id: '2', accountId: 'l', date: '2026-11-12', amount: 30000, kind: 'income', categoryId: null, label: 'VIR', importKey: 'k2' },
+    { id: '3', accountId: 'a', date: '2026-11-20', amount: -5000, kind: 'expense', categoryId: null, label: 'x' },
+    { id: '4', accountId: 'l', date: '2026-11-20', amount: 5000, kind: 'income', categoryId: null, label: 'y' });
+  delete s.transfersLinked; // data saved before this version
+  const n = B.validateState(JSON.parse(JSON.stringify(s)));
+  assert.deepEqual(n.ops.map(o => o.kind), ['transfer', 'transfer', 'expense', 'income']);
+  assert.equal(n.transfersLinked, true);
+});
+
+test('Budget audit: an edited payment re-checks its link, a near-identical manual entry is a duplicate, the export skips settled items', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'BCP', opening: 100000, liquid: true });
+  B.saveOp(s, { accountId: 'a', date: '2026-11-03', kind: 'expense', cents: 8371, label: 'Assurance', planned: true });
+  const r = B.saveOp(s, { accountId: 'a', date: '2026-11-03', kind: 'expense', cents: 8371, label: 'Assurance' });
+  assert.ok(r.plannedId);
+  B.saveOp(s, { accountId: 'a', date: '2026-11-03', kind: 'expense', cents: 2000, label: 'Restaurant' }, r.id);
+  assert.ok(!s.ops.find(o => o.id === r.id).plannedId); // no longer the same payment
+  assert.equal(B.monthStats(s, '2026-11').expectedSpent, 8371);
+  assert.doesNotMatch(B.opsCsv(B.validateState(JSON.parse(JSON.stringify(s)))), /Restaurant.*\n.*Assurance.*oui\n.*Assurance.*non/);
+  B.saveOp(s, { accountId: 'a', date: '2026-11-10', kind: 'expense', cents: 4210, label: 'Carrefour courses' });
+  assert.equal(B.importPreview(s, 'a', [{ date: '2026-11-11', amount: -4210, label: 'CB CARREFOUR 11/11' }])[0].dup, 'saisie manuelle identique');
+});

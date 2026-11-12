@@ -15,7 +15,7 @@ export function emptyState() {
     categories: ['Logement', 'Alimentation', 'Santé', 'Mobilité et auto', 'Impôts', 'Loisirs', 'Abonnements', 'Divers']
       .map(name => ({ id: uid(), name, cap: 0 })),
     settings: { reserve: 0, globalCap: 0, alertPct: 80, lowSpendable: 10000, notify: false, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
-    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {}, discovery: { date: null, items: {} }, notified: { verdicts: {}, sent: [] }, journal: [],
+    instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {}, discovery: { date: null, items: {} }, notified: { verdicts: {}, sent: [] }, journal: [], transfersLinked: true,
   };
 }
 
@@ -31,6 +31,7 @@ export function validateState(x) {
     x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {}; x.discovery ??= { date: null, items: {} };
     x.settings.profile.maxWeight ??= 10; // never chosen: the usual 10 % per stock; « no limit » stays a choice (0)
     x.settings.lowSpendable ??= 10000; x.notified ??= { verdicts: {}, sent: [] }; x.journal ??= [];
+    if (!x.transfersLinked) { linkImportedTransfers(x, new Set(x.ops.filter(o => o.importKey).map(o => o.id))); x.transfersLinked = true; }
     // sales saved by v32-v35 did not reach the cash
     for (const o of x.ops ?? []) if (o.proceeds != null) { o.amount = o.proceeds; delete o.proceeds; }
   }
@@ -119,17 +120,17 @@ export const guessSub = n => [[/livret ?a\b/i, 'livretA'], [/ldds|ldd\b/i, 'ldds
 const CEILINGS = { livretA: ['Livret A', 2295000], ldds: ['LDDS', 1200000], lep: ['LEP', 1000000], cel: ['CEL', 1530000], pel: ['PEL', 6120000] }, PEA_CEILING = 15000000;
 
 // The category given last time to a payment whose label starts with the same word (« CB CARREFOUR … »): imports learn from you.
-export function guessCategory(s, label) {
+export function guessCategory(s, label, kinds = ['expense', 'refund']) {
   const k = labelWords(label)[0];
   if (!k) return null;
-  return s.ops.filter(o => o.categoryId && !o.planned && labelWords(o.label)[0] === k && s.categories.some(c => c.id === o.categoryId))
+  return s.ops.filter(o => o.categoryId && !o.planned && kinds.includes(o.kind) && labelWords(o.label)[0] === k && s.categories.some(c => c.id === o.categoryId))
     .sort((a, b) => a.date.localeCompare(b.date)).at(-1)?.categoryId ?? null;
 }
 
-// PEA: five years after its opening date, withdrawals no longer close it (YYYY-MM-DD, or null without a date).
 // A broad index fund: said so by its type or name, or named after an index (« iShares Core MSCI World », « Amundi PEA S&P 500 »).
 export const isFund = i => /\b(ETF|UCITS|MSCI|S&P ?500|STOXX|NASDAQ[- ]?100|CAC ?40|FTSE|Russell|Tracker)\b/i.test(`${i?.type ?? ''} ${i?.name ?? ''}`);
 
+// PEA: five years after its opening date, withdrawals no longer close it (YYYY-MM-DD, or null without a date).
 export const peaFiveYears = a => (a.opened ? `${+a.opened.slice(0, 4) + 5}${a.opened.slice(4)}` : null);
 
 // What makes the figures wrong, said plainly, until it is fixed.
@@ -179,7 +180,14 @@ export function saveOp(s, f, id) {
   const o = s.ops.find(x => x.id === id);
   if (!o || o.transferId || o.envelopeId) throw new Error('Opération non modifiable ici');
   Object.assign(o, fields);
-  if (o.planned) delete o.plannedId; else unmatchPlanned(s, o.id);
+  if (o.planned) { // the payments linked to it must still match it
+    for (const x of s.ops.filter(x => x.plannedId === o.id)) if (!pays(o, x)) delete x.plannedId;
+    if (!s.ops.some(x => x.plannedId === o.id)) linkPaid(s, o);
+  } else {
+    const due = o.plannedId && s.ops.find(x => x.id === o.plannedId);
+    if (due && !pays(due, o)) delete o.plannedId;
+    if (!o.plannedId) autoMatch(s, o);
+  }
 }
 
 const unmatchPlanned = (s, plannedId) => s.ops.forEach(x => x.plannedId === plannedId && delete x.plannedId);
@@ -187,6 +195,8 @@ const unmatchPlanned = (s, plannedId) => s.ops.forEach(x => x.plannedId === plan
 export function deleteOp(s, id) {
   const o = s.ops.find(x => x.id === id);
   if (!o) return;
+  const r = (o.planned || o.autoPaid) && o.recurringId && s.recurring.find(x => x.id === o.recurringId);
+  if (r) (r.skip ??= []).push(monthOf(o.date)); // that month is skipped, not generated again
   s.ops = s.ops.filter(x => x.id !== id && !(o.transferId && x.transferId === o.transferId));
   unmatchPlanned(s, id);
 }
@@ -276,13 +286,20 @@ export function generateRecurring(s, m) {
   const last = new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7), 0)).getUTCDate();
   let n = 0;
   for (const r of s.recurring) {
-    if (s.ops.some(o => o.recurringId === r.id && monthOf(o.date) === m)) continue;
+    if (r.skip?.includes(m) || s.ops.some(o => o.recurringId === r.id && monthOf(o.date) === m)) continue;
     const due = { id: uid(), accountId: r.accountId, date: `${m}-${String(Math.min(r.day, last)).padStart(2, '0')}`,
       amount: signed(r.kind, r.cents), kind: r.kind, categoryId: r.categoryId, label: r.label, planned: true, recurringId: r.id };
     s.ops.push(due); linkPaid(s, due);
     n++;
   }
   return n;
+}
+
+// A recurring item stopped: its dates still to come go too; those already paid stay in the history.
+export function deleteRecurring(s, id) {
+  const taken = new Set(s.ops.map(o => o.plannedId).filter(Boolean));
+  s.recurring = s.recurring.filter(r => r.id !== id);
+  s.ops = s.ops.filter(o => !(o.recurringId === id && o.planned && !taken.has(o.id)));
 }
 
 // ---- stock-market envelopes ----
@@ -1072,17 +1089,29 @@ export function importPreview(s, accountId, rows) {
     const base = [accountId, r.date, r.amount, r.label.trim().toLowerCase()].join('|');
     const importKey = `${base}#${(seen[base] = (seen[base] || 0) + 1)}`; // identical lines in one statement stay distinct
     const dup = keys.has(importKey) ? 'déjà importée'
-      : s.ops.some(o => !o.planned && !o.importKey && o.accountId === accountId && o.date === r.date && o.amount === r.amount) ? 'saisie manuelle identique' : null;
+      : s.ops.some(o => !o.planned && !o.importKey && o.accountId === accountId && o.amount === r.amount
+        && (o.date === r.date || (Math.abs(dayNum(o.date) - dayNum(r.date)) <= 3 && labelWords(o.label).some(w => labelWords(r.label).includes(w))))) ? 'saisie manuelle identique' : null;
     return { ...r, importKey, dup, keep: !dup };
   });
 }
 
+// 4. The same amount leaving one of your accounts and reaching another within 3 days is an internal transfer, linked at once
+// (« Délier » undoes it). Only pairs with at least one line from `ids` are linked: older manual entries are left as they are.
+function linkImportedTransfers(s, ids) {
+  for (const [out, inn] of transferCandidates(s)) if (ids.has(out.id) || ids.has(inn.id)) linkTransfer(s, out.id, inn.id);
+}
+
 export function importRows(s, accountId, preview, today) {
-  const kept = preview.filter(r => r.keep);
+  const kept = preview.filter(r => r.keep), added = new Set();
   for (const r of kept) {
-    const o = { id: uid(), accountId, date: r.date, amount: r.amount, kind: r.amount < 0 ? 'expense' : 'income', categoryId: guessCategory(s, r.label), label: r.label, importKey: r.importKey };
+    // money back from a shop you already filed as spending is a refund, not income
+    const back = r.amount > 0 && guessCategory(s, r.label);
+    const o = { id: uid(), accountId, date: r.date, amount: r.amount, kind: r.amount < 0 ? 'expense' : back ? 'refund' : 'income',
+      categoryId: r.amount < 0 ? guessCategory(s, r.label) : back || guessCategory(s, r.label, ['income']), label: r.label, importKey: r.importKey };
     s.ops.push(o); autoMatch(s, o);
+    added.add(o.id);
   }
+  linkImportedTransfers(s, added);
   s.lastImport = { date: today, accountId, count: kept.length };
   return kept.length;
 }
@@ -1221,7 +1250,7 @@ export function opsCsv(s) {
   const acc = Object.fromEntries(s.accounts.map(a => [a.id, a.name])), cat = Object.fromEntries(s.categories.map(c => [c.id, c.name]));
   const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   return ['date;compte;type;categorie;libelle;montant;prevue',
-    ...[...s.ops].sort((a, b) => a.date.localeCompare(b.date)).map(o =>
+    ...s.ops.filter(o => !(o.planned && matchedIds(s).has(o.id))).sort((a, b) => a.date.localeCompare(b.date)).map(o =>
       [o.date, q(acc[o.accountId]), KINDS[o.kind], q(cat[o.categoryId]), q(o.label), (o.amount / 100).toFixed(2).replace('.', ','), o.planned ? 'oui' : 'non'].join(';'))].join('\n');
 }
 
