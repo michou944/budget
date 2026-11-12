@@ -365,14 +365,14 @@ export function addHolding(s, accountId, isin, date, qty, costCents) {
 }
 
 // A purchase made at the broker: the title is followed from its ISIN if new, the amount (fees included) leaves that account's cash.
-export function addPurchase(s, { accountId, isin, name, date, qty, cents }) {
+export function addPurchase(s, { accountId, isin, name, date, qty, cents, advice }) {
   if (!s.accounts.some(a => a.id === accountId)) throw new Error('Choisissez le courtier');
   if (!Number.isInteger(cents) || cents <= 0) throw new Error('Montant invalide');
   const id = String(isin ?? '').trim().toUpperCase();
   if (!s.instruments.some(i => i.isin === id)) saveInstrument(s, { isin: id, name, currency: 'EUR' }); // the real currency comes with the first price
   checkTrade(s, id, qty);
   const i = s.instruments.find(x => x.isin === id);
-  s.ops.push({ id: uid(), accountId, date, amount: -cents, kind: 'invest', isin: id, qty, label: `Achat ${i.name}`, seq: stamp(s) });
+  s.ops.push({ id: uid(), accountId, date, amount: -cents, kind: 'invest', isin: id, qty, label: `Achat ${i.name}`, seq: stamp(s), ...(advice && { advice }) });
   return id;
 }
 
@@ -449,6 +449,18 @@ export function wealthSeries(s, months, today) {
     return { month: m, cash, securities, total: cash + securities };
   });
 }
+// Each line's plan: its last purchase and the advice behind it, how it did since, and the levels where a rule acts.
+export function linePlan(s, today, isin) {
+  const p = s.settings.profile, r = RISK[p.risk], tr = trend(s, isin), hi = Math.max(tr?.high ?? 0, s.peaks[isin]?.price ?? 0);
+  return valuation(s, today).filter(l => l.isin === isin).map(l => {
+    const last = s.ops.filter(o => o.accountId === l.accountId && o.isin === isin && o.qty > 0 && !['Position existante', 'Position transférée'].includes(o.label))
+      .sort((a, b) => a.date.localeCompare(b.date)).at(-1);
+    const paid = last ? (last.cost ?? -last.amount) / last.qty : null, unit = l.value != null ? l.value / l.qty : null, pru = l.cost / l.qty;
+    return { accountId: l.accountId, last: last ? { date: last.date, perPart: Math.round(paid), advice: last.advice ?? null } : null, pru: Math.round(pru),
+      sinceBuy: paid && unit ? ((unit - paid) * 100) / paid : null, lossAt: Math.round(pru * (1 - r.maxLoss / 100)),
+      trailAt: p.horizon < 5 && hi ? Math.round(hi * (1 - r.trail / 100) * 100) / 100 : null };
+  });
+}
 export const realizedGain = (s, isin) => book(s).filter(p => p.isin === isin).reduce((a, p) => a + p.realized, 0);
 
 // Decision journal: what I decided, why, at what price and what the tool said; reviewed later against the current price.
@@ -464,6 +476,8 @@ export function addDecision(s, today, isin, action, note = '', verdict = null) {
 const SIDE = { Acheter: 'achat', Renforcer: 'achat', Alléger: 'vente', Vendre: 'vente' };
 export function logVerdicts(s, today) {
   for (const x of suggestions(s, today)) {
+    // first day of the current verdict: a buy is only advised once it held since the day before
+    if (!x.suspended && (s.signalSince ??= {})[x.isin]?.action !== x.action) s.signalSince[x.isin] = { action: x.action, date: today };
     if (x.suspended || !SIDE[x.action] || !s.quotes[x.isin]) continue;
     const last = (s.journal ?? []).filter(d => d.isin === x.isin).at(-1);
     if (last?.verdict !== x.action) addDecision(s, today, x.isin, SIDE[x.action], '', x.action);
@@ -597,10 +611,10 @@ export function strategyRules(s) {
     { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : vendre la moitié.` },
     { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
     { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
-    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération.' },
+    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille.' },
     { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
     { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés.' },
-    { n: 10, title: 'Pause après une vente', text: `Après une vente sur une ligne, les règles 4, 5 et 6 et la vente d’un tiers de la règle 7 ne se déclenchent plus pendant ${SALE_PAUSE} jours : sinon, la même règle revendrait une partie du reste à chaque fois.` },
+    { n: 10, title: 'Pause après une opération', text: `Après une vente sur une ligne, les règles 4, 5, 6 et la vente d’un tiers (règle 7) ne se déclenchent plus pendant ${SALE_PAUSE} jours. Après un achat, pas de nouveau renforcement pendant ${SALE_PAUSE} jours. Sinon, la même règle revendrait ou rachèterait une partie à chaque fois.` },
   ];
 }
 
@@ -671,6 +685,10 @@ export function suggestions(s, today) {
     const cooled = own.length > 0 && own.every(lastSale);
     const resume = cooled ? new Date(Date.parse(own.map(lastSale).sort().at(-1)) + SALE_PAUSE * 864e5).toISOString().slice(0, 10) : null;
     if (cooled) add(0, `Ligne déjà allégée : pas de nouvelle vente partielle avant le ${dayMonth(resume)}.`, undefined, undefined, 10);
+    const lastBuy = l => s.ops.filter(o => o.accountId === l.accountId && o.isin === i.isin && o.qty > 0 && !['Position existante', 'Position transférée'].includes(o.label)
+      && dayNum(today) - dayNum(o.date) < SALE_PAUSE).map(o => o.date).sort().at(-1);
+    const bought = own.map(lastBuy).filter(Boolean).sort().at(-1), buyResume = bought && new Date(Date.parse(bought) + SALE_PAUSE * 864e5).toISOString().slice(0, 10);
+    if (bought) add(0, `Ligne renforcée le ${dayMonth(bought)} : pas de nouvel achat avant le ${dayMonth(buyResume)}.`, undefined, undefined, 10);
     if (takeProfit && gainAll > 0 && !cooled) { // active style: sell part of a strong rise, buy back later on a dip
       limitHit = true;
       const pea = mine.every(l => s.accounts.find(a => a.id === l.accountId)?.type === 'PEA');
@@ -696,7 +714,7 @@ export function suggestions(s, today) {
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
     const buyAt = /\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`) ? 1.5 : 2;
     const action = notable.length ? 'À examiner'
-      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : score >= buyAt && !overCap ? 'Renforcer' : 'Conserver')
+      : isHeld ? (score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : score >= buyAt && !overCap && !bought ? 'Renforcer' : 'Conserver')
         : score >= buyAt ? 'Acheter' : 'Attendre';
     // everything the verdict merged, in one sentence
     const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
@@ -715,6 +733,7 @@ export function suggestions(s, today) {
     const worst = [...reasons].filter(r => r.pts < 0).sort((a, b) => a.pts - b.pts)[0]?.rule ?? 7;
     let order = overCap ? none(3, 'Aucun achat : la ligne dépasse votre limite. Aucune vente demandée.') : none(7, 'Aucune opération : ni signal d’achat ni signal de vente.');
     if (cooled && action === 'Conserver') order = none(10, `Aucune vente pour l’instant : ligne déjà allégée, prochaine révision le ${dayMonth(resume)}.`);
+    if (bought && action === 'Conserver' && score >= buyAt) order = none(10, `Aucun renfort pour l’instant : ligne renforcée le ${dayMonth(bought)}, prochaine révision le ${dayMonth(buyResume)}.`);
     if (action === 'À examiner') order = none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.');
     if (action === 'Vendre' || action === 'Alléger') {
       if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
@@ -786,6 +805,8 @@ export function suggestions(s, today) {
       const others = plans.filter(x => x.qty && x !== best);
       if (others.length) pick.reasons.push({ pts: 0, text: `Frais pour ce même montant ailleurs : ${others.map(x => `${x.a.name} ${euro(x.fees)}`).join(' · ')}.` });
     }
+    const since = s.signalSince?.[pick.isin];
+    if (pick.order?.qty && !(since?.action === pick.action && since.date < today)) Object.assign(pick.order, { pending: true, text: `À confirmer demain : ${pick.order.text}` });
   });
   return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
 }

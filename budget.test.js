@@ -918,6 +918,7 @@ test('Order: reinforcing always says how much, a third of the line without a tar
   B.setHistory(s, ETF, closes(120, 0.1), 'test', T);
   s.news.push(...['a', 'b'].map(u => ({ isin: ETF, title: 'x', url: `https://e.com/${u}`, source: 'e', publishedAt: T, sentiment: 0.6 })));
   s.accounts.find(a => a.id === 'b').opening = 200000;
+  s.signalSince = { [ETF]: { action: 'Renforcer', date: dateBack(1) } }; // signal already there yesterday
   let v = verdict(s, ETF);
   assert.equal(v.action, 'Renforcer'); assert.match(v.order.text, /^Renforcer de 9 parts sur Fortuneo/); assert.equal(v.order.funded, true); // third of 3 600 € = 1 200 €, fees within
   assert.match(v.facts, /tendance haussière, actualités positives, risque dans vos limites/);
@@ -955,4 +956,27 @@ test('After a partial sale the same rule waits 30 days instead of selling part o
   s.ops.find(o => o.qty === -19).date = dateBack(31); // the pause is over
   v = verdict(s, ETF);
   assert.equal(v.action, 'Alléger'); assert.equal(v.order.qty, 10);
+});
+
+test('Buy signal: to confirm the first day, advised once it held since the day before', () => {
+  const s = p03(500000);
+  let v = verdict(s, CW8);
+  assert.equal(v.order.pending, true); assert.match(v.order.text, /^À confirmer demain : Acheter/);
+  B.logVerdicts(s, T); assert.equal(verdict(s, CW8).order.pending, true); // same day: still to confirm
+  s.signalSince[CW8].date = dateBack(1);
+  v = verdict(s, CW8); assert.equal(v.order.pending, undefined); assert.match(v.order.text, /^Acheter/);
+});
+
+test('After a purchase the line is not reinforced again for 30 days, and its plan is written', () => {
+  const s = withInstruments(); s.accounts.find(a => a.id === 'b').opening = 200000;
+  B.addHolding(s, 'b', ETF, '2025-01-01', 30, 300000);
+  B.setHistory(s, ETF, closes(120, 0.1), 'test', T);
+  s.news.push(...['a', 'b'].map(u => ({ isin: ETF, title: 'x', url: `https://e.com/${u}`, source: 'e', publishedAt: T, sentiment: 0.6 })));
+  assert.equal(verdict(s, ETF).action, 'Renforcer');
+  B.addPurchase(s, { accountId: 'b', isin: ETF, date: T, qty: 9, cents: 108000, advice: { action: 'Renforcer', rule: 7 } });
+  const v = verdict(s, ETF);
+  assert.equal(v.action, 'Conserver'); assert.equal(v.order.rule, 10); assert.match(v.order.text, /Aucun renfort/);
+  const [pl] = B.linePlan(s, T, ETF), pru = 408000 / 39;
+  assert.equal(pl.last.perPart, 12000); assert.deepEqual(pl.last.advice, { action: 'Renforcer', rule: 7 });
+  assert.equal(pl.pru, Math.round(pru)); assert.equal(pl.lossAt, Math.round(pru * 0.8)); assert.equal(Math.round(pl.sinceBuy), 0);
 });

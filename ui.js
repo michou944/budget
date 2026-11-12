@@ -337,7 +337,7 @@ const views = {
       return `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}${i.auto && !ls.length ? '<span class="tag">repéré par l’outil</span>' : ''}`
         + (ls.length ? `<div class="muted">🏦 ${ls.map(l => `${esc(accTag(l.accountId))} · ${num(l.qty)} part(s)`).join(' — ')}</div>` : '')
         + `<div class="muted">${main ? esc(main.text) : ''}</div>`
-        + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.funded ? 'good' : 'warn'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
+        + (x.order?.side ? `<div class="${x.order.side === 'vente' ? 'bad' : x.order.funded && !x.order.pending ? 'good' : 'warn'}"><b>👉 ${esc(x.order.text)}</b></div>` : '') + '</div>'
         + spark(x.isin) + `<div class="r">${ls.length ? (ls.every(l => l.value == null) ? '<span class="muted">non valorisé</span>' : `${eur(total(ls))}<div>${money(gain)}</div>`)
           : q ? `${num(q.price)} ${i.currency}` : ''}</div></div>`;
     };
@@ -350,6 +350,10 @@ const views = {
         priceChart(isin, i.currency)
         + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
         + ((r => `<div class="day">🎯 Conclusion</div><div><b>${esc(x.order.text)}</b></div>${x.facts ? `<div>Bilan : ${esc(x.facts)}.</div>` : ''}${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
+        + ((ps => (ps.length ? '<div class="day">📋 Mon plan</div>' + ps.map(pl => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${esc(accTag(pl.accountId))}</b>`
+          + `<div>${pl.last ? `Dernier achat le ${shortDate(pl.last.date)} à ${eur(pl.last.perPart)} la part${pl.last.advice ? `, sur avis « ${esc(pl.last.advice.action)} » (règle ${pl.last.advice.rule})` : ', saisi sans avis de l’outil'}` : 'Position déclarée ou importée'}`
+          + `${pl.sinceBuy != null ? ` · depuis : ${pl.sinceBuy >= 0 ? '+' : ''}${pl.sinceBuy.toFixed(1).replace('.', ',')} %` : ''}</div>`
+          + `<div class="muted">Prix de revient ${eur(pl.pru)} la part. Règle 4 : vendre la moitié si la part vaut moins de ${eur(pl.lossAt)}.${pl.trailAt ? ` Règle 5 : stop suiveur à ${num(pl.trailAt)} ${esc(i.currency)}.` : ''}</div></div>`).join('') : ''))(B.linePlan(S, t, isin)))
         + [['👍 Pour', r => r.pts > 0], ['👎 Contre', r => r.pts < 0], ['ℹ️ À savoir', r => !r.pts]].map(([t, keep]) => {
           const rs = x.reasons.filter(keep);
           return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}${r.rule ? ` <span class="tag">Règle ${r.rule}</span>` : ''}</span></div>`).join('') : '';
@@ -427,9 +431,9 @@ const views = {
         + (!ready ? empty('Ouvrez « Réglages bourse » en bas de page : 5 minutes de configuration, une seule fois.') : '')
         + (view.refreshing ? empty('⏳ Actualisation des cours, actualités et avis…') : lr ? empty(`Dernière actualisation : ${new Date(lr.at).toLocaleString('fr-FR', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`) : '')
         + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '')
-      + ((todo, odd, gone) => card('🎯 Conclusion du jour', (todo.length || odd.length ? [...todo, ...odd].map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}<div class="${x.order.side === 'vente' ? 'bad' : x.order.side === 'achat' && !x.order.funded ? 'warn' : x.order.side ? 'good' : 'muted'}"><b>${esc(x.order.text)}</b></div><div class="muted">${esc(x.facts ?? '')}</div></div></div>`).join('')
+      + ((todo, odd, gone) => card('🎯 Conclusion du jour', (todo.length || odd.length ? [...todo, ...odd].map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}<div class="${x.order.side === 'vente' ? 'bad' : x.order.side === 'achat' && (!x.order.funded || x.order.pending) ? 'warn' : x.order.side ? 'good' : 'muted'}"><b>${esc(x.order.text)}</b></div><div class="muted">${esc(x.facts ?? '')}</div></div></div>`).join('')
           : empty(lines.length ? 'Aucune opération aujourd’hui : vos règles ne déclenchent ni achat ni vente.' : 'Aucune opération proposée pour l’instant.'))
-        + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente').reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat').reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
+        + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente').reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
         + (gone ? `<div class="warn">${gone} titre(s) sans conclusion : cours manquant ou périmé.</div>` : '')
         + empty(`Calcul fusionnant cours, tendance, actualités, vos limites et vos parts visées. Les résultats des sociétés ne sont pas analysés. ${B.DISCLAIMER}`)))(
         [...sug.filter(x => x.order?.side === 'vente'), ...sug.filter(x => x.order?.side === 'achat' && x.order.qty)], sug.filter(x => x.action === 'À examiner'), sug.filter(x => x.suspended && x.held).length)
@@ -813,7 +817,10 @@ const forms = {
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
   move: f => B.moveHolding(S, f.isin, f.from, f.to),
-  purchase: f => { view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount) }); },
+  purchase: f => {
+    const x = B.suggestions(S, today()).find(y => y.isin === String(f.isin).trim().toUpperCase()); // the advice in force, kept with the purchase
+    view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount), advice: x && ['Acheter', 'Renforcer'].includes(x.action) ? { action: x.action, rule: x.order.rule } : undefined });
+  },
   cash: f => { for (const [k, v] of Object.entries(f)) if (k.startsWith('c_') && String(v).trim()) B.setCash(S, k.slice(2), f.date, parseEur(v)); },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
   sale: f => { const [accountId, isin] = pair(f.pos); B.addSale(S, accountId, isin, f.date, decimal(f.qty), positive(f.amount)); },
