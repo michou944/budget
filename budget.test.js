@@ -1084,3 +1084,21 @@ test('Lot 1: trailing stop from the high since purchase, 10 % per stock by defau
   c.accounts.find(a => a.id === 'l').opening = 150000;
   assert.match(verdict(c, CW8).order.text, /épargne de précaution : 1,5 mois/);
 });
+
+test('Lot 2: limit order, tax and fees on a CTO sale, PEA sold first in gain, next review date', () => {
+  const s = withInstruments(); s.settings.profile.horizon = 3;
+  s.accounts.find(a => a.id === 'b').type = 'CTO';
+  s.accounts.push({ id: 'p', name: 'PEA F', institution: 'Fortuneo', opening: 0, type: 'PEA' });
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 90000); B.addHolding(s, 'p', ETF, '2025-01-01', 10, 90000);
+  const h = closes(100, 0); h[50] = [h[50][0], 120]; h[99] = [T, 104]; // in gain, 13 % under its high: trailing stop, sell half
+  B.setHistory(s, ETF, h, 'test', T);
+  let o = B.suggestions(s, T).find(x => x.isin === ETF).order;
+  assert.equal(o.qty, 10); assert.equal(o.sells.length, 1); assert.equal(o.sells[0].accountId, 'p'); // half of 20, all from the PEA
+  assert.match(o.how, /^Ordre à cours limité à 103,48 EUR minimum, valable 1 semaine\./);
+  assert.match(o.how, /Sur le PEA d’abord/); assert.match(o.how, /pause sur cette ligne jusqu’au/);
+  s.ops = s.ops.filter(x => x.accountId !== 'p'); // CTO only: the tax is estimated
+  o = B.suggestions(s, T).find(x => x.isin === ETF).order;
+  assert.match(o.how, /impôt estimé ≈ 21,98 € sur 70,00 € de plus-value.*il vous reste ≈ 496,07 €/); // 5 parts × 14 € gain × 31,4 %, minus Fortuneo's 1,95 € fee
+  const p = p03(500000); p.signalSince = { [CW8]: { action: 'Acheter', date: dateBack(1) } };
+  assert.match(B.suggestions(p, T).find(x => x.isin === CW8).order.how, /^Ordre à cours limité à 564,01 EUR maximum.*pas de nouveau renfort avant le/);
+});

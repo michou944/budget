@@ -697,6 +697,14 @@ const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
 
 const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
 const SALE_PAUSE = 30, dayMonth = d => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+// shortcut: flat tax of 2026 on gains realised on a CTO (income tax + social levies), to check against the law and one's own case
+export const CTO_TAX = 31.4;
+// A limit order a little above (buy) or below (sell) the last price: never pay a wide gap between buyers and sellers.
+const limitOrder = (side, price, cur) => {
+  const d = price < 1 ? 4 : 2, f = 10 ** d, lim = side === 'achat' ? Math.ceil(price * 1.005 * f) / f : Math.floor(price * 0.995 * f) / f;
+  return `Ordre à cours limité à ${lim.toFixed(d).replace('.', ',')} ${cur} ${side === 'achat' ? 'maximum' : 'minimum'}, valable 1 semaine.`;
+};
+const inDays = (today, n) => dayMonth(new Date(Date.parse(today) + n * 864e5).toISOString().slice(0, 10));
 
 // Broad index funds, judged by the same rules as any idea. Added once: one you stop following stays gone.
 const ETF_CANDIDATES = [['LU1681043599', 'Amundi MSCI World (CW8)'], ['FR0011871128', 'Amundi PEA S&P 500 (PSP5)'],
@@ -849,13 +857,27 @@ export function suggestions(s, today) {
     if (action === 'Vendre' || action === 'Alléger') {
       if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
       // the strongest rule triggered sets the size; a signal alone sells a third
-      const cut = action === 'Vendre' ? { rule: 7, share: 1, ls: own } : [...cuts].sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
-      const sells = cut.ls.map(l => {
-        const a = s.accounts.find(x => x.id === l.accountId), x = l.qty * cut.share;
-        const qty = cut.share === 1 ? l.qty : Math.min(l.qty, a?.fractional || !Number.isInteger(l.qty) ? Math.floor(x * 1000) / 1000 : Math.ceil(x - 1e-9));
-        return { accountId: l.accountId, name: a?.name ?? '?', qty, amount: Math.round((l.value * qty) / l.qty) };
-      }).filter(x => x.qty > 0);
-      order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule,
+      // the same rule hit on several accounts (a stop on the PEA and on the CTO) acts on all of them at once
+      const merged = Object.values(cuts.reduce((m, c) => { m[c.rule] = m[c.rule] ? { ...m[c.rule], ls: [...new Set([...m[c.rule].ls, ...c.ls])] } : { ...c }; return m; }, {}));
+      const cut = action === 'Vendre' ? { rule: 7, share: 1, ls: own } : merged.sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
+      const acc = l => s.accounts.find(x => x.id === l.accountId), pea = l => acc(l)?.type === 'PEA';
+      const mk = (l, x) => {
+        const a = acc(l), qty = cut.share === 1 ? l.qty : Math.min(l.qty, a?.fractional || !Number.isInteger(l.qty) ? Math.floor(x * 1000) / 1000 : Math.ceil(x - 1e-9));
+        return { accountId: l.accountId, name: a?.name ?? '?', qty, amount: Math.round((l.value * qty) / l.qty), gain: Math.round(((l.value - l.cost) * qty) / l.qty), pea: pea(l),
+          fee: a?.feeFixed ?? brokerFees(a?.institution)?.fixed ?? p.fee };
+      };
+      // held on a PEA and a CTO: in gain, sell on the PEA first (no tax there); in loss, on the CTO (the loss lowers the tax on other gains)
+      const inGain = cut.ls.reduce((n, l) => n + l.value - l.cost, 0) >= 0, mixed = cut.ls.some(pea) && cut.ls.some(l => !pea(l));
+      let left = cut.ls.reduce((n, l) => n + l.qty, 0) * cut.share;
+      const sells = (mixed && cut.share < 1 ? [...cut.ls].sort((a, b) => (pea(b) - pea(a)) * (inGain ? 1 : -1)).map(l => { const x = Math.min(l.qty, left); left -= x; return mk(l, x); })
+        : cut.ls.map(l => mk(l, l.qty * cut.share))).filter(x => x.qty > 0);
+      const how = [limitOrder('vente', q.price, i.currency),
+        mixed && cut.share < 1 ? (inGain ? 'Sur le PEA d’abord : la plus-value n’y est pas imposée.' : 'Sur le CTO d’abord : la moins-value y réduit l’impôt sur vos autres plus-values.') : '',
+        ...sells.map(x => (x.pea ? `${x.name} (PEA) : pas d’impôt tant que l’argent reste dans le PEA.`
+          : x.gain > 0 ? `${x.name} : impôt estimé ≈ ${euro(Math.round((x.gain * CTO_TAX) / 100))} sur ${euro(x.gain)} de plus-value (${String(CTO_TAX).replace('.', ',')} %, à vérifier), frais ≈ ${euro(x.fee)} : il vous reste ≈ ${euro(x.amount - Math.round((x.gain * CTO_TAX) / 100) - x.fee)}.`
+            : x.gain < 0 ? `${x.name} : moins-value de ${euro(-x.gain)}, déductible de vos plus-values de cette année et des 10 suivantes.` : '')),
+        cut.share < 1 ? `Ensuite, pause sur cette ligne jusqu’au ${inDays(today, SALE_PAUSE)} (règle 10).` : ''].filter(Boolean).join(' ');
+      order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule, how,
         text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
     }
     return { ...base, action, score, missing, invalidation, confidence, order, facts };
@@ -918,6 +940,7 @@ export function suggestions(s, today) {
       if (others.length) pick.reasons.push({ pts: 0, text: `Frais pour ce même montant ailleurs : ${others.map(x => `${x.a.name} ${euro(x.fees)}`).join(' · ')}.` });
     }
     if (pick.order?.qty && cushion != null && cushion < 3) pick.order.text += ` · ⚠️ épargne de précaution : ${cushion.toFixed(1).replace('.', ',')} mois de dépenses (3 conseillés)`;
+    if (pick.order?.qty) pick.order.how = `${limitOrder('achat', price, i.currency)} Ensuite, pas de nouveau renfort avant le ${inDays(today, SALE_PAUSE)} (règle 10).`;
     const since = s.signalSince?.[pick.isin];
     if (pick.order?.qty && !(since?.action === pick.action && since.date < today)) Object.assign(pick.order, { pending: true, text: `À confirmer demain : ${pick.order.text}` });
   });
