@@ -127,6 +127,9 @@ export function guessCategory(s, label) {
 }
 
 // PEA: five years after its opening date, withdrawals no longer close it (YYYY-MM-DD, or null without a date).
+// A broad index fund: said so by its type or name, or named after an index (« iShares Core MSCI World », « Amundi PEA S&P 500 »).
+export const isFund = i => /\b(ETF|UCITS|MSCI|S&P ?500|STOXX|NASDAQ[- ]?100|CAC ?40|FTSE|Russell|Tracker)\b/i.test(`${i?.type ?? ''} ${i?.name ?? ''}`);
+
 export const peaFiveYears = a => (a.opened ? `${+a.opened.slice(0, 4) + 5}${a.opened.slice(4)}` : null);
 
 // What makes the figures wrong, said plainly, until it is fixed.
@@ -148,6 +151,15 @@ export function checks(s, today) {
     out.push(`${x.a.name} : ${x.pea ? 'environ ' : ''}${euro(x.used)} sur ${euro(x.cap)} de plafond${x.pea ? ' de versements' : ''}.`
       + (room.length ? ` Place restante : ${room.map(y => `${y.a.name} (${euro(y.cap - y.used)})`).join(', ')}.` : ''));
   }
+  const tot = sum(lines, l => l.value ?? l.cost), etfLine = l => isFund(l.inst), byT = {};
+  for (const l of lines) byT[l.isin] = (byT[l.isin] ?? 0) + (l.value ?? l.cost);
+  for (const [k, v] of Object.entries(byT)) {
+    const l = lines.find(x => x.isin === k);
+    if (tot && !etfLine(l) && (v * 100) / tot > 20) out.push(`${l.inst.name} pèse ${Math.round((v * 100) / tot)} % de vos titres : au-delà de 20 % sur une seule action, le risque est concentré.`);
+  }
+  const pf = s.settings.profile, core = tot ? (sum(lines.filter(etfLine), l => l.value ?? l.cost) * 100) / tot : 0;
+  if (tot && pf.coreMin > 0 && core < pf.coreMin) out.push(`Cœur en ETF larges : ${Math.round(core)} % de vos titres pour un objectif de ${pf.coreMin} % : les achats d’actions sont suspendus, renforcez les ETF.`);
+  if (tot && pf.coreMin == null && core < 50) out.push(`Seulement ${Math.round(core)} % de vos titres en ETF larges. Repère courant : 70 % ou plus en ETF (le « cœur »). Choisissez votre objectif dans Bourse → Plus → Mon profil.`);
   for (const a of s.accounts) if (a.type === 'PEA' && !a.opened) out.push(`${a.name} : indiquez sa date d’ouverture pour suivre les 5 ans du PEA.`);
   // a savings or brokerage account can rest for months: only current accounts are expected to move
   for (const x of staleAccounts(s, today)) if (x.a.liquid && !invest.includes(x.a)) out.push(`${x.a.name} : aucun mouvement depuis 30 jours. Importez un relevé ou vérifiez le solde.`);
@@ -548,7 +560,7 @@ export function backtest(s) {
   const p = s.settings.profile, START = 64, out = [];
   for (const i of s.instruments.filter(x => !x.auto && (s.history[x.isin]?.length ?? 0) >= START + 20)) {
     const h = s.history[i.isin], t = emptyState(), [d0, p0] = h[START];
-    t.settings.profile = { ...p, targets: {}, maxWeight: 0 };
+    t.settings.profile = { ...p, targets: {}, maxWeight: 0, coreMin: 0, monthly: 0 };
     t.accounts.push({ id: 'bt', name: 'test', institution: '', opening: 0, type: 'CTO', fractional: true, feeFixed: p.fee, feePct: 0, fxPct: 0 });
     t.instruments.push({ isin: i.isin, name: i.name, symbol: '', place: '', currency: 'EUR', type: i.type ?? '' });
     t.ops.push({ id: uid(), accountId: 'bt', date: d0, amount: 0, cost: 100000, kind: 'invest', isin: i.isin, qty: 1000 / p0, label: 'Position existante', seq: stamp(t) });
@@ -557,7 +569,7 @@ export function backtest(s) {
       const day = h[k][0];
       setHistory(t, i.isin, h.slice(0, k + 1), 'test', day);
       const o = suggestions(t, day).find(x => x.isin === i.isin)?.order;
-      if (o?.side === 'vente' && o.qty) { addSale(t, 'bt', i.isin, day, o.qty, Math.max(1, Math.round(o.amount - p.fee))); trades++; }
+      if (o?.side === 'vente' && o.qty && !o.pending) { addSale(t, 'bt', i.isin, day, o.qty, Math.max(1, Math.round(o.amount - p.fee))); trades++; }
       else if (o?.side === 'achat' && o.qty && o.funded && !o.pending) { addPurchase(t, { accountId: 'bt', isin: i.isin, date: day, qty: o.qty, cents: o.amount }); trades++; }
       logVerdicts(t, day); // what the app does after each refresh: buy signals get confirmed the next day
     }
@@ -725,10 +737,14 @@ export function strategyRules(s) {
     { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : alerte « à examiner », sans vente automatique. Testée sur l’année passée, la vente automatique vendait près du point bas des titres qui sont ensuite remontés.` },
     { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut atteint après votre achat : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
     { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
-    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : en style actif, vendre un tiers (tout vendre à −3) ; en long terme, alerte à examiner, sans vente. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille.' },
+    { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : en style actif, vendre un tiers (tout vendre à −3) ; en long terme, alerte à examiner, sans vente. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille ; une vente décidée par ces seuls signaux (style actif) aussi. Les stops restent immédiats.' },
     { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
     { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés. Si votre épargne de précaution couvre moins de 3 mois de dépenses, chaque achat le signale.' },
     { n: 10, title: 'Pause après une opération', text: `Après une vente sur une ligne, les règles 5, 6 et la vente d’un tiers (règle 7) ne se déclenchent plus pendant ${SALE_PAUSE} jours. Après un achat, pas de nouveau renforcement pendant ${SALE_PAUSE} jours. Sinon, la même règle revendrait ou rachèterait une partie à chaque fois.` },
+    { n: 11, title: 'Tendance de fond', text: 'Une action n’est achetée ou renforcée que si son cours est au-dessus de sa moyenne 200 jours (dès que l’appli a un an de cours) : on n’achète pas une action en baisse durable.' },
+    { n: 12, title: 'Cœur et satellite', text: (p.coreMin ? `Au moins ${p.coreMin} % de vos titres en ETF larges (le cœur). Si les actions (le satellite) dépassent ${100 - p.coreMin} %, plus d’achat d’action. ` : 'Pas d’objectif de cœur dans votre profil. ')
+      + 'Chaque idée repérée par l’outil est limitée à 3 % du portefeuille.' },
+    { n: 13, title: 'Versement mensuel', text: p.monthly > 0 ? `Chaque mois, ${euro(p.monthly)} dans votre principal ETF large, quel que soit son cours. Les ETF ne s’achètent alors plus sur signal : on évite d’acheter en haut de vague.` : 'Inactif : aucun versement mensuel dans votre profil.' },
   ];
 }
 
@@ -742,6 +758,8 @@ export function suggestions(s, today) {
   for (const l of lines) byIsin[l.isin] = (byIsin[l.isin] ?? 0) + (l.value ?? 0);
   const total = Object.values(byIsin).reduce((a, b) => a + b, 0);
   const weight = isin => (total ? ((byIsin[isin] ?? 0) * 100) / total : 0);
+  const isEtf = isFund;
+  const etfValue = Object.entries(byIsin).reduce((n, [k, v]) => n + (isEtf(s.instruments.find(i => i.isin === k)) ? v : 0), 0);
   const hasTargets = Object.values(p.targets).some(t => t > 0);
 
   const out = s.instruments.map(i => {
@@ -822,17 +840,22 @@ export function suggestions(s, today) {
       }
     }
     // concentration limit per line: above it, never « Renforcer », whatever the other signals say
-    const etf = /\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`); // a broad fund spreads its own risk: no limit per line
+    const etf = isFund(i); // a broad fund spreads its own risk: no limit per line
     const overCap = isHeld && !etf && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
     if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`, undefined, undefined, 3);
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
-    const buyAt = etf ? 1.5 : 2;
+    const buyAt = etf ? (p.monthly > 0 ? Infinity : 1.5) : 2; // 13. with a monthly plan, ETFs are bought by the plan, not on signals
+    const ind0 = etf ? null : indicators(s, i.isin), downLong = !!ind0?.sma200 && q.price < ind0.sma200;
+    const sat = !etf && p.coreMin > 0 && total > 0 && ((total - etfValue) * 100) / total >= 100 - p.coreMin;
+    if (score >= buyAt && downLong) add(0, `Sous sa moyenne 200 jours (${ind0.sma200.toFixed(2).replace('.', ',')} ${i.currency}) : pas d’achat tant que la tendance de fond baisse.`, undefined, undefined, 11);
+    if (score >= buyAt && sat) add(0, `Actions à ${Math.round(((total - etfValue) * 100) / total)} % de vos titres, au-delà de vos ${100 - p.coreMin} % : pas de nouvel achat d’action.`, undefined, undefined, 12);
+    const canBuy = score >= buyAt && !downLong && !sat;
     // 3. long term: price and news signals alone never sell, they ask for a look; risk rules and targets still act
     const longSignal = isHeld && p.style !== 'actif' && !limitHit && !cooled && !cuts.length && score <= -2;
     const action = notable.length || lossAlert != null || longSignal ? 'À examiner'
-      : isHeld ? (p.style === 'actif' && score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : score >= buyAt && !overCap && !bought ? 'Renforcer' : 'Conserver')
-        : score >= buyAt ? 'Acheter' : 'Attendre';
+      : isHeld ? (p.style === 'actif' && score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : canBuy && !overCap && !bought ? 'Renforcer' : 'Conserver')
+        : canBuy ? 'Acheter' : 'Attendre';
     // everything the verdict merged, in one sentence
     const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
     const facts = [!tr ? 'tendance inconnue' : q.price >= tr.sma50 ? 'tendance haussière' : 'tendance baissière',
@@ -850,6 +873,8 @@ export function suggestions(s, today) {
     const worst = [...reasons].filter(r => r.pts < 0).sort((a, b) => a.pts - b.pts)[0]?.rule ?? 7;
     let order = overCap ? none(3, 'Aucun achat : la ligne dépasse votre limite. Aucune vente demandée.') : none(7, 'Aucune opération : ni signal d’achat ni signal de vente.');
     if (cooled && action === 'Conserver') order = none(10, `Aucune vente pour l’instant : ligne déjà allégée, prochaine révision le ${dayMonth(resume)}.`);
+    if ((downLong || sat) && score >= buyAt && ['Conserver', 'Attendre'].includes(action)) order = none(sat ? 12 : 11, sat
+      ? 'Aucun achat d’action : la part en actions dépasse votre objectif. Renforcez plutôt le cœur (ETF larges).' : 'Aucun achat : le cours est sous sa moyenne 200 jours, la tendance de fond baisse.');
     if (bought && action === 'Conserver' && score >= buyAt) order = none(10, `Aucun renfort pour l’instant : ligne renforcée le ${dayMonth(bought)}, prochaine révision le ${dayMonth(buyResume)}.`);
     if (action === 'À examiner') order = notable.length ? none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.')
       : lossAlert == null ? none(7, 'Signaux de baisse marqués : à examiner. En long terme, l’outil ne vend pas sur ces seuls signaux.')
@@ -879,6 +904,8 @@ export function suggestions(s, today) {
         cut.share < 1 ? `Ensuite, pause sur cette ligne jusqu’au ${inDays(today, SALE_PAUSE)} (règle 10).` : ''].filter(Boolean).join(' ');
       order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule, how,
         text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
+      const was = s.signalSince?.[i.isin];
+      if (cut.rule === 7 && !limitHit && !(was?.action === action && was.date < today)) Object.assign(order, { pending: true, text: `À confirmer demain : ${order.text}` });
     }
     return { ...base, action, score, missing, invalidation, confidence, order, facts };
   });
@@ -905,11 +932,12 @@ export function suggestions(s, today) {
       // the broker's cash limits the purchase only when the app knows it (some movement recorded or an opening balance)
       const known = a.opening !== 0 || s.ops.some(o => o.accountId === a.id && o.amount !== 0), cash = balance(s, a);
       // never buy so much that the line would pass the concentration limit
-      const room = !/\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`) && p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
+      const room = !isFund(i) && p.maxWeight > 0 && p.maxWeight < 100 && total ? Math.floor(((p.maxWeight * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - p.maxWeight / 100)) : Infinity;
       const pool = env ? (known ? Math.min(left, spare[a.id]) : left) : known ? Math.floor(spare[a.id] / (signals.length - k)) : 0;
       const aim = p.targets[i.isin] ?? 0, toTarget = !env && aim > 0 && aim < 100 && total ? Math.max(0, Math.round(((aim * total) / 100 - (byIsin[i.isin] ?? 0)) / (1 - aim / 100))) : Infinity; // new money also grows the total
       const titles = Object.keys(byIsin).length, sized = env ? Infinity : toTarget < Infinity ? toTarget : line ? Math.round((byIsin[i.isin] ?? 0) / 3) : titles ? Math.round(total / titles / 3) : Infinity;
-      const limit = Math.max(0, Math.min(pool, room, sized)), wanted = Math.min(room, sized);
+      const ideaRoom = i.auto && total ? Math.max(0, Math.floor(0.03 * total - (byIsin[i.isin] ?? 0))) : Infinity;
+      const limit = Math.max(0, Math.min(pool, room, ideaRoom, sized)), wanted = Math.min(room, ideaRoom, sized);
       // what the rule asks for, whatever the cash: shown even when the money is not there yet
       const wantQty = wanted === Infinity || wanted <= 0 ? 0 : a.fractional ? Math.max(0, Math.floor(((wanted - fixed) / raw) * 1000) / 1000) : Math.max(room >= unit ? 1 : 0, Math.floor((wanted - fixed) / unit));
       const qty = a.fractional ? Math.max(0, Math.floor(((limit - fixed) / raw) * 1000) / 1000) : Math.max(0, Math.floor((limit - fixed) / unit));
@@ -944,7 +972,30 @@ export function suggestions(s, today) {
     const since = s.signalSince?.[pick.isin];
     if (pick.order?.qty && !(since?.action === pick.action && since.date < today)) Object.assign(pick.order, { pending: true, text: `À confirmer demain : ${pick.order.text}` });
   });
+  if (p.monthly > 0) monthlyPlan(s, today, out, lines, byIsin, isEtf);
   return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
+}
+
+// 13. A fixed sum each month into the main broad ETF, whatever its price: once a purchase of an ETF is recorded this month, it is done.
+function monthlyPlan(s, today, out, lines, byIsin, isEtf) {
+  const p = s.settings.profile, m = monthOf(today), etfs = out.filter(x => !x.suspended && isEtf(s.instruments.find(i => i.isin === x.isin)));
+  const core = [...etfs].sort((a, b) => (byIsin[b.isin] ?? 0) - (byIsin[a.isin] ?? 0))[0];
+  if (!core || core.action === 'À examiner' || core.order?.side === 'vente') return; // a notable news item, or a sale of that ETF, comes first
+  if (s.ops.some(o => o.qty > 0 && o.amount < 0 && monthOf(o.date) === m && etfs.some(x => x.isin === o.isin))) {
+    if (!core.order?.side) core.order = { side: null, qty: 0, rule: 13, text: 'Versement du mois fait ✓' };
+    return;
+  }
+  const i = s.instruments.find(x => x.isin === core.isin), price = s.quotes[i.isin].price, rate = i.currency === 'EUR' ? 1 : s.fx[i.currency]?.rate;
+  const line = lines.find(l => l.isin === i.isin);
+  const a = (line && s.accounts.find(x => x.id === line.accountId)) ?? s.accounts.find(x => x.type === 'PEA' && peaEligible(i)) ?? s.accounts.find(x => x.type === 'CTO');
+  if (!a || !rate) return;
+  const fee = a.feeFixed ?? brokerFees(a.institution)?.fixed ?? p.fee, unit = Math.ceil((price * 100) / rate);
+  const qty = a.fractional ? Math.max(0, Math.floor(((p.monthly - fee) / unit) * 1000) / 1000) : Math.max(0, Math.floor((p.monthly - fee) / unit));
+  const amount = qty ? Math.round(qty * unit) + fee : 0, cash = balance(s, a), funded = cash >= amount;
+  core.order = qty
+    ? { side: 'achat', qty, amount, accountId: a.id, rule: 13, funded, monthly: true, how: `${limitOrder('achat', price, i.currency)} Puis plus rien sur cet ETF ce mois-ci.`,
+      text: `Versement du mois : acheter ${parts(qty)} de ${i.name} sur ${a.name} (≈ ${euro(amount)}, frais inclus)${funded ? '' : ` : il manque ${euro(amount - cash)} d’espèces`}` }
+    : { side: null, qty: 0, rule: 13, text: `Versement du mois : ${euro(p.monthly)} ne suffisent pas pour une part de ${i.name} (${euro(unit + fee)} avec les frais).` };
 }
 
 // ---- phone notifications: only what is new, so the same advice or alert is never sent twice ----

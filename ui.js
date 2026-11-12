@@ -444,7 +444,7 @@ const views = {
         + (lr?.errors.length ? `<details><summary class="warn">${lr.errors.length} point(s) à régler</summary>${lr.errors.map(e => `<div class="muted">• ${esc(e)}</div>`).join('')}</details>` : '') + '</section>'
       + ((todo, odd, gone) => card('🎯 Conclusion du jour', (todo.length || odd.length ? [...todo, ...odd].map(x => `<div class="op tap" data-act="inst" data-id="${esc(x.isin)}"><div class="l"><b>${esc(x.name)}</b> ${badge(x)}<div class="${x.order.side === 'vente' ? 'bad' : x.order.side === 'achat' && (!x.order.funded || x.order.pending) ? 'warn' : x.order.side ? 'good' : 'muted'}"><b>${esc(x.order.text)}</b></div>${x.order.how ? `<div style="font-size:13px">${esc(x.order.how)}</div>` : ''}<div class="muted">${esc(x.facts ?? '')}</div></div></div>`).join('')
           : empty(lines.length ? 'Aucune opération aujourd’hui : vos règles ne déclenchent ni achat ni vente.' : 'Aucune opération proposée pour l’instant.'))
-        + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente').reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
+        + (todo.length ? `<div class="row"><span>Total à vendre / à acheter</span><b>${eur(todo.filter(x => x.order.side === 'vente' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))} / ${eur(todo.filter(x => x.order.side === 'achat' && !x.order.pending).reduce((n, x) => n + x.order.amount, 0))}</b></div>` : '')
         + (gone ? `<div class="warn">${gone} titre(s) sans conclusion : cours manquant ou périmé.</div>` : '')
         + empty(`Calcul fusionnant cours, tendance, actualités, vos limites et vos parts visées. Les résultats des sociétés ne sont pas analysés. ${B.DISCLAIMER}`)))(
         [...sug.filter(x => x.order?.side === 'vente'), ...sug.filter(x => x.order?.side === 'achat' && x.order.qty)], sug.filter(x => x.action === 'À examiner'), sug.filter(x => x.suspended && x.held).length)
@@ -508,6 +508,9 @@ const views = {
         ${empty('En style actif, plus d’allers-retours veut dire plus de frais et, sur un compte-titres, plus d’impôts : à privilégier sur le PEA.')}
         <div class="muted">Une seule ligne ne doit pas dépasser</div>
         <div class="chips">${[0, 5, 10, 15, 20].map(w => chip('maxWeight', w, w ? `${w} % du portefeuille` : 'Pas de limite', (pf.maxWeight ?? 0) === w)).join('')}</div>
+        <div class="muted">Part minimum en ETF larges (le « cœur »)</div>
+        <div class="chips">${[0, 50, 70, 80].map(c => chip('coreMin', c, c ? `${c} %` : 'Pas d’objectif', pf.coreMin === c)).join('')}</div>
+        <label>Versement mensuel dans le cœur (€, 0 = aucun)<input name="monthly" inputmode="decimal" value="${euros(pf.monthly ?? 0)}"></label>
         <div class="muted">Je garde mes placements environ</div>
         <div class="chips">${[...new Set([2, 5, 10, 20, pf.horizon])].sort((x, y) => x - y).map(h => chip('horizon', h, `${h} ans`, pf.horizon === h)).join('')}</div>
         <div class="muted">Je supporte une baisse de</div>
@@ -837,7 +840,7 @@ const forms = {
     if (Object.values(targets).reduce((a, b) => a + b, 0) > 100.0001) throw new Error('La somme des cibles dépasse 100 %');
     const fee = parseEur(f.fee);
     if (!B.RISK[f.risk] || fee < 0) throw new Error('Valeur de profil invalide');
-    S.settings.profile = { style: f.style === 'actif' ? 'actif' : 'long', maxWeight: n(f.maxWeight ?? 0, 0, 100), horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
+    S.settings.profile = { style: f.style === 'actif' ? 'actif' : 'long', maxWeight: n(f.maxWeight ?? 0, 0, 100), coreMin: f.coreMin == null ? S.settings.profile.coreMin : n(f.coreMin, 0, 100), monthly: Math.max(0, parseEur(f.monthly)), horizon: n(f.horizon, 1, 50), risk: f.risk, driftPts: n(f.driftPts, 1, 50), fee, fxPct: n(f.fxPct || 0, 0, 10), targets };
   },
   quote: f => B.setQuote(S, f.isin, decimal(f.price), f.date),
   market: f => {

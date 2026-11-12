@@ -1102,3 +1102,44 @@ test('Lot 2: limit order, tax and fees on a CTO sale, PEA sold first in gain, ne
   const p = p03(500000); p.signalSince = { [CW8]: { action: 'Acheter', date: dateBack(1) } };
   assert.match(B.suggestions(p, T).find(x => x.isin === CW8).order.how, /^Ordre à cours limité à 564,01 EUR maximum.*pas de nouveau renfort avant le/);
 });
+
+test('Lot 3: long-term trend, core and satellite, idea cap, sale confirmation, monthly plan, concentration', () => {
+  // 11. a stock bouncing inside a year-long fall is not bought
+  let s = withInstruments(); s.accounts.find(a => a.id === 'b').opening = 500000;
+  const fall = Array.from({ length: 250 }, (_, k) => [dateBack(249 - k), k < 200 ? 200 - k * 0.6 : 80 + (k - 200) * 0.4]); // 200 → 80, then a bounce to 100, still under its 200-day average
+  B.setHistory(s, ETF, fall, 't', T);
+  s.news.push(...['a', 'b'].map(u => ({ isin: ETF, title: 'x', url: `https://e.com/${u}`, source: 'e', publishedAt: T, sentiment: 0.6 })));
+  let v = verdict(s, ETF);
+  assert.equal(v.action, 'Attendre'); assert.equal(v.order.rule, 11);
+  // 12. satellite full: no stock purchase while ETFs are under their share
+  s = p03(500000); s.settings.profile.coreMin = 70; // ETF « World » is a stock here (no ETF in its name): 100 % satellite
+  v = verdict(s, CW8);
+  assert.equal(v.action, 'Attendre'); assert.equal(v.order.rule, 12);
+  assert.match(B.checks(s, T).join('\n'), /Cœur en ETF larges : 0 %/);
+  // a sale on signals alone waits a day (active style), a stop does not
+  s = withInstruments(); s.settings.profile.style = 'actif';
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
+  B.setHistory(s, ETF, closes(110, -0.3), 't', T);
+  s.news.push(...['a', 'b'].map(u => ({ isin: ETF, title: 'x', url: `https://e.com/${u}`, source: 'e', publishedAt: T, sentiment: -0.6 })));
+  v = verdict(s, ETF);
+  assert.equal(v.order.side, 'vente'); assert.equal(v.order.pending, true); assert.match(v.order.text, /^À confirmer demain/);
+  s.signalSince = { [ETF]: { action: v.action, date: dateBack(1) } };
+  assert.equal(verdict(s, ETF).order.pending, undefined);
+  // 13. monthly plan: a fixed sum into the main ETF, once a month
+  s = withInstruments(); s.settings.profile.monthly = 30000;
+  s.accounts.push({ id: 'p', name: 'PEA F', institution: 'Fortuneo', opening: 100000, type: 'PEA' });
+  B.saveInstrument(s, { isin: CW8, name: 'Amundi MSCI World UCITS ETF', currency: 'EUR', type: 'ETF' });
+  B.setHistory(s, CW8, closes(100, 0), 't', T);
+  v = verdict(s, CW8);
+  assert.equal(v.order.rule, 13); assert.equal(v.order.accountId, 'p'); assert.equal(v.order.qty, 2); assert.match(v.order.text, /^Versement du mois : acheter 2 parts/);
+  B.addPurchase(s, { accountId: 'p', isin: CW8, date: T, qty: 2, cents: 20195 });
+  assert.equal(verdict(s, CW8).order.text, 'Versement du mois fait ✓');
+  // concentration
+  const c = withInstruments(); B.addHolding(c, 'b', ETF, '2025-01-01', 10, 100000); B.setQuote(c, ETF, 100, T);
+  assert.match(B.checks(c, T).join('\n'), /World pèse 100 % de vos titres/);
+});
+
+test('Funds are recognised by their index name too', () => {
+  for (const n of ['iShares Core MSCI World', 'Amundi PEA S&P 500 (PSP5)', 'Amundi MSCI World (CW8)', 'AMUNDI PEA MONDE (MSCI World) UCITS ETF']) assert.ok(B.isFund({ name: n }), n);
+  for (const n of ['TotalEnergies', 'Apple', 'World', 'Safran']) assert.ok(!B.isFund({ name: n }), n);
+});
