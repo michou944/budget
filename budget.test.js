@@ -369,7 +369,8 @@ test('Verdict: trend and news tone are merged into one conclusion for a new titl
   assert.equal(verdict(s, ETF).action, 'Attendre');
 });
 
-test('Verdict: risk limits of the profile on held titles — trailing stop, max loss — else hold', () => {
+const spike = () => { const h = closes(100, 0); h[50] = [h[50][0], 120]; h[99] = [T, 104]; return h; }; // flat 100, one day at 120, now 104
+test('Verdict: risk limits of the profile on held titles — trailing stop sells, max loss only alerts', () => {
   const s = withInstruments();
   B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
   B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'Alpha Vantage', T); // -12,9 % from its high, +4,5 % gain
@@ -378,13 +379,10 @@ test('Verdict: risk limits of the profile on held titles — trailing stop, max 
   s.settings.profile.horizon = 10;
   assert.equal(verdict(s, ETF).action, 'Conserver');
   B.setQuote(s, ETF, 79, T); // −21 % vs cost, limit 20 % for « équilibré »
-  assert.equal(verdict(s, ETF).action, 'Vendre');
+  let v = verdict(s, ETF);
+  assert.equal(v.action, 'À examiner'); assert.equal(v.order.side, null); assert.equal(v.order.rule, 4); assert.match(v.order.text, /Aucune vente automatique/);
   s.settings.profile.risk = 'dynamique';
   assert.equal(verdict(s, ETF).action, 'Conserver');
-  s.settings.profile.risk = 'equilibre';
-  B.setHistory(s, ETF, [...closes(60, -0.1).slice(0, 99), [T, 79]], 'Alpha Vantage', T); // rising trend, but still −21 % vs cost
-  const v = verdict(s, ETF);
-  assert.ok(v.score >= -0.5); assert.equal(v.action, 'Alléger'); // the loss limit is never outvoted into « Conserver »
 });
 
 test('P02: news is opt-in, searched by name, web links only, tone kept, one call per title per day, key never logged', async () => {
@@ -858,14 +856,12 @@ test('Hand-entered purchase takes from the cash, the sale lands in it, a declare
 
 test('Order: every sale says how many, on which account and under which rule', () => {
   let s = withInstruments();
-  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
-  B.setHistory(s, ETF, closes(70, 0), 'test', T); // 30 % lost, flat
+  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 90000); s.settings.profile.horizon = 3;
+  B.setHistory(s, ETF, spike(), 'test', T); // in gain, 13 % under its high, above its average: trailing stop, sell half
   let o = verdict(s, ETF).order;
-  assert.deepEqual([o.side, o.qty, o.amount, o.rule], ['vente', 5, 35000, 4]);
+  assert.deepEqual([o.side, o.qty, o.amount, o.rule], ['vente', 5, 52000, 5]);
   assert.match(o.text, /Vendre 5 parts sur Fortuneo/);
-  s = withInstruments();
-  B.addHolding(s, 'b', ETF, '2025-01-01', 10, 100000);
-  B.setHistory(s, ETF, closes(70, -0.3), 'test', T); // and falling: everything goes
+  B.setHistory(s, ETF, [...closes(120, 0).slice(0, 99), [T, 104.5]], 'test', T); // stop hit and below its average: everything goes
   const v = verdict(s, ETF);
   assert.equal(v.action, 'Vendre'); assert.equal(v.order.qty, 10); assert.equal(v.order.rule, 7); // the rule that says « tout vendre »
 });
@@ -946,11 +942,11 @@ test('Sales saved without cash by v32-v35 reach it on load, once', () => {
 });
 
 test('After a partial sale the same rule waits 30 days instead of selling part of the rest', () => {
-  const s = withInstruments();
-  B.addHolding(s, 'b', ETF, '2025-01-01', 38, 380000);
-  B.setHistory(s, ETF, closes(70, 0), 'test', T); // 30 % lost: maximum loss, sell half
+  const s = withInstruments(); s.settings.profile.horizon = 3;
+  B.addHolding(s, 'b', ETF, '2025-01-01', 38, 342000);
+  B.setHistory(s, ETF, spike(), 'test', T); // trailing stop: sell half
   assert.equal(verdict(s, ETF).order.qty, 19);
-  B.addSale(s, 'b', ETF, T, 19, 133000);
+  B.addSale(s, 'b', ETF, T, 19, 197600);
   let v = verdict(s, ETF);
   assert.equal(v.action, 'Conserver'); assert.equal(v.order.side, null); assert.equal(v.order.rule, 10);
   s.ops.find(o => o.qty === -19).date = dateBack(31); // the pause is over
@@ -1035,12 +1031,16 @@ test('Checks: savings near their ceiling, with the room left elsewhere', () => {
 });
 
 test('Backtest: the real rules replayed day by day, against keeping the title', () => {
-  const s = withInstruments();
-  const h = Array.from({ length: 200 }, (_, k) => [dateBack(199 - k), k < 70 ? 100 : 100 - ((k - 70) * 50) / 129]); // flat, then halves
-  B.setHistory(s, ETF, h, 'test', T);
-  const [r] = B.backtest(s);
-  assert.equal(r.isin, ETF); assert.ok(r.trades >= 1);
-  assert.ok(Math.abs(r.hold + 50) < 1); // keeping it: about −50 %
-  assert.ok(r.rules > r.hold + 10, `rules ${r.rules} vs hold ${r.hold}`); // the loss limit got out early
+  let s = withInstruments();
+  const fall = Array.from({ length: 200 }, (_, k) => [dateBack(199 - k), k < 70 ? 100 : 100 - ((k - 70) * 50) / 129]); // flat, then halves
+  B.setHistory(s, ETF, fall, 'test', T);
+  let [r] = B.backtest(s);
+  assert.equal(r.isin, ETF); assert.ok(Math.abs(r.hold + 50) < 1); // keeping it: about −50 %
+  assert.ok(Math.abs(r.rules - r.hold) < 1); // the max loss alerts, it no longer sells on its own
+  s = withInstruments(); s.settings.profile.horizon = 3;
+  const peak = Array.from({ length: 200 }, (_, k) => [dateBack(199 - k), k < 130 ? 100 + (k * 50) / 130 : 150 - ((k - 130) * 60) / 69]); // up to 150, down to 90
+  B.setHistory(s, ETF, peak, 'test', T);
+  [r] = B.backtest(s);
+  assert.ok(r.trades >= 1); assert.ok(r.rules > r.hold + 5, `rules ${r.rules} vs hold ${r.hold}`); // the trailing stop kept part of the gain
   assert.deepEqual(B.backtest(withInstruments()), []); // no prices, no test
 });

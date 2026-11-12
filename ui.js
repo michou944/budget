@@ -358,7 +358,7 @@ const views = {
         + ((ps => (ps.length ? '<div class="day">📋 Mon plan</div>' + ps.map(pl => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${esc(accTag(pl.accountId))}</b>`
           + `<div>${pl.last ? `Dernier achat le ${shortDate(pl.last.date)} à ${eur(pl.last.perPart)} la part${pl.last.advice ? `, sur avis « ${esc(pl.last.advice.action)} » (règle ${pl.last.advice.rule})` : ', saisi sans avis de l’outil'}` : 'Position déclarée ou importée'}`
           + `${pl.sinceBuy != null ? ` · depuis : ${pl.sinceBuy >= 0 ? '+' : ''}${pl.sinceBuy.toFixed(1).replace('.', ',')} %` : ''}</div>`
-          + `<div class="muted">Prix de revient ${eur(pl.pru)} la part. Règle 4 : vendre la moitié si la part vaut moins de ${eur(pl.lossAt)}.${pl.trailAt ? ` Règle 5 : stop suiveur à ${num(pl.trailAt)} ${esc(i.currency)}.` : ''}</div></div>`).join('') : ''))(B.linePlan(S, t, isin)))
+          + `<div class="muted">Prix de revient ${eur(pl.pru)} la part. Règle 4 : alerte si la part passe sous ${eur(pl.lossAt)}.${pl.trailAt ? ` Règle 5 : stop suiveur à ${num(pl.trailAt)} ${esc(i.currency)}.` : ''}</div></div>`).join('') : ''))(B.linePlan(S, t, isin)))
         + [['👍 Pour', r => r.pts > 0], ['👎 Contre', r => r.pts < 0], ['ℹ️ À savoir', r => !r.pts]].map(([t, keep]) => {
           const rs = x.reasons.filter(keep);
           return rs.length ? `<div class="day">${t}</div>` + rs.map(r => `<div class="row"><span>${signOf(r)} ${esc(r.text)}${meta(r)}${r.rule ? ` <span class="tag">Règle ${r.rule}</span>` : ''}</span></div>`).join('') : '';

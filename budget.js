@@ -697,13 +697,13 @@ export function strategyRules(s) {
     { n: 1, title: 'Données fiables', text: 'Sans cours récent ou sans taux de change à jour : pas d’avis, aucune opération.' },
     { n: 2, title: 'Part visée', text: targets ? `Chaque titre revient vers sa part visée, à ${p.driftPts} points près. Trop haut : vendre l’excédent. Trop bas : acheter jusqu’à la cible.` : 'Inactive : aucune part visée dans votre profil.' },
     { n: 3, title: 'Limite par ligne', text: p.maxWeight ? `Une ligne ne dépasse pas ${p.maxWeight} % du portefeuille : au-delà, aucun renforcement.` : 'Inactive : pas de limite dans votre profil.' },
-    { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : vendre la moitié.` },
+    { n: 4, title: 'Perte maximale', text: `Perte de ${r.maxLoss} % ou plus sur une ligne (profil ${r.label}) : alerte « à examiner », sans vente automatique. Testée sur l’année passée, la vente automatique vendait près du point bas des titres qui sont ensuite remontés.` },
     { n: 5, title: 'Stop suiveur', text: p.horizon < 5 ? `Une ligne en gain qui recule de ${r.trail} % depuis son plus haut : vendre la moitié.` : `Inactive : horizon de ${p.horizon} ans (elle joue sous 5 ans).` },
     { n: 6, title: 'Bénéfices et rachats', text: active ? 'Cours à 12 % ou plus au-dessus de sa moyenne 50 jours, avec un gain : vendre un tiers. Repli de 7 % sous cette moyenne dans une tendance haussière : acheter.' : 'Inactive : style long terme.' },
     { n: 7, title: 'Signaux de marché', text: 'Tendance, variation sur 3 mois et ton des actualités s’additionnent aux points des autres règles. Total de 2 ou plus (1,5 pour un ETF, qui n’a pas d’actualités propres) : acheter. De −2 ou moins : vendre un tiers. De −3 ou moins : tout vendre. Sinon : aucune opération. Un achat n’est conseillé que si son signal tient depuis la veille.' },
     { n: 8, title: 'Actualité importante', text: 'Fusion, radiation, fermeture… : aucune opération avant d’avoir lu l’article.' },
     { n: 9, title: 'Argent des achats', text: 'Montant d’un achat : jusqu’à la part visée s’il y en a une ; sinon un tiers de la ligne, ou un tiers d’une ligne moyenne pour un nouveau titre. L’enveloppe du mois va au meilleur signal, les autres se partagent les espèces du compte-titres ou du PEA. Les livrets ne sont jamais utilisés.' },
-    { n: 10, title: 'Pause après une opération', text: `Après une vente sur une ligne, les règles 4, 5, 6 et la vente d’un tiers (règle 7) ne se déclenchent plus pendant ${SALE_PAUSE} jours. Après un achat, pas de nouveau renforcement pendant ${SALE_PAUSE} jours. Sinon, la même règle revendrait ou rachèterait une partie à chaque fois.` },
+    { n: 10, title: 'Pause après une opération', text: `Après une vente sur une ligne, les règles 5, 6 et la vente d’un tiers (règle 7) ne se déclenchent plus pendant ${SALE_PAUSE} jours. Après un achat, pas de nouveau renforcement pendant ${SALE_PAUSE} jours. Sinon, la même règle revendrait ou rachèterait une partie à chaque fois.` },
   ];
 }
 
@@ -768,7 +768,7 @@ export function suggestions(s, today) {
     if (found) add(found.tone >= 0.2 ? 1 : 0, `Repéré par l’outil : ${found.docs} articles cette semaine, ton ${found.tone >= 0.2 ? 'positif' : 'plutôt neutre'} (${found.tone.toFixed(2).replace('.', ',')}).`, found.asOf, 'Marketaux', 7);
     const notable = recent.filter(n => NOTABLE.test(n.title));
     for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source, 8);
-    let limitHit = false;
+    let limitHit = false, lossAlert = null;
     const mine = lines.filter(l => l.isin === i.isin && l.cost > 0), gainAll = mine.reduce((a, l) => a + l.gain, 0);
     const lastSale = l => s.ops.filter(o => o.accountId === l.accountId && o.isin === i.isin && o.qty < 0 && dayNum(today) - dayNum(o.date) < SALE_PAUSE).map(o => o.date).sort().at(-1);
     const cooled = own.length > 0 && own.every(lastSale);
@@ -789,7 +789,7 @@ export function suggestions(s, today) {
       if (lastSale(l)) continue;
       const gain = ((l.value - l.cost) * 100) / l.cost, hi = Math.max(tr?.high ?? 0, s.peaks[i.isin]?.price ?? 0);
       const drop = hi ? ((hi - q.price) * 100) / hi : 0;
-      if (gain <= -risk.maxLoss) { limitHit = true; cuts.push({ rule: 4, share: 0.5, ls: [l] }); add(-2, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}).`, undefined, undefined, 4); }
+      if (gain <= -risk.maxLoss) { lossAlert = Math.min(lossAlert ?? 0, gain); add(0, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}) : à examiner, pas de vente automatique.`, undefined, undefined, 4); }
       else if (p.horizon < 5 && gain > 0 && drop >= risk.trail) {
         limitHit = true;
         cuts.push({ rule: 5, share: 0.5, ls: [l] });
@@ -802,14 +802,14 @@ export function suggestions(s, today) {
     const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
     // a risk limit of the profile always leads to reducing the line, whatever the other signals say
     const buyAt = /\b(ETF|UCITS)\b/i.test(`${i.type ?? ''} ${i.name}`) ? 1.5 : 2;
-    const action = notable.length ? 'À examiner'
+    const action = notable.length || lossAlert != null ? 'À examiner'
       : isHeld ? (score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : score >= buyAt && !overCap && !bought ? 'Renforcer' : 'Conserver')
         : score >= buyAt ? 'Acheter' : 'Attendre';
     // everything the verdict merged, in one sentence
     const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
     const facts = [!tr ? 'tendance inconnue' : q.price >= tr.sma50 ? 'tendance haussière' : 'tendance baissière',
       notable.length ? 'actualité importante à lire' : toneAvg != null ? `actualités ${toneAvg > 0.2 ? 'positives' : toneAvg < -0.2 ? 'négatives' : 'neutres'}` : recent.length ? `${recent.length} actualité(s) sans ton mesuré` : 'pas d’actualité récente',
-      cuts.some(c => c.rule === 4 || c.rule === 5) ? 'limite de risque atteinte' : cuts.some(c => c.rule === 6) ? 'forte hausse à encaisser' : cooled ? 'ligne déjà allégée' : isHeld ? 'risque dans vos limites' : null,
+      lossAlert != null ? 'perte maximale dépassée' : cuts.some(c => c.rule === 5) ? 'stop suiveur atteint' : cuts.some(c => c.rule === 6) ? 'forte hausse à encaisser' : cooled ? 'ligne déjà allégée' : isHeld ? 'risque dans vos limites' : null,
       overCap ? 'ligne au-delà de votre limite' : alloc && t > 0 ? (alloc.pts > 0 ? 'sous sa part visée' : alloc.pts < 0 ? 'au-dessus de sa part visée' : 'à sa part visée') : null].filter(Boolean).join(', ');
     // the conclusion's frame: what it still lacks, what would overturn it, and how much data stands behind it
     const ind = indicators(s, i.isin), level = ind?.sma200 ?? ind?.sma50, two = v => v.toFixed(2).replace('.', ',');
@@ -823,7 +823,8 @@ export function suggestions(s, today) {
     let order = overCap ? none(3, 'Aucun achat : la ligne dépasse votre limite. Aucune vente demandée.') : none(7, 'Aucune opération : ni signal d’achat ni signal de vente.');
     if (cooled && action === 'Conserver') order = none(10, `Aucune vente pour l’instant : ligne déjà allégée, prochaine révision le ${dayMonth(resume)}.`);
     if (bought && action === 'Conserver' && score >= buyAt) order = none(10, `Aucun renfort pour l’instant : ligne renforcée le ${dayMonth(bought)}, prochaine révision le ${dayMonth(buyResume)}.`);
-    if (action === 'À examiner') order = none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.');
+    if (action === 'À examiner') order = notable.length ? none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.')
+      : none(4, `Aucune vente automatique : perte de ${pct(-lossAlert)}, au-delà de votre limite de ${risk.maxLoss} %. Regardez les résultats et les actualités de la société avant de décider.`);
     if (action === 'Vendre' || action === 'Alléger') {
       if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
       // the strongest rule triggered sets the size; a signal alone sells a third
