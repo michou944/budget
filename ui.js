@@ -255,7 +255,10 @@ const views = {
     const paid = S.ops.filter(o => !o.planned && B.monthOf(o.date) === m && o.kind === 'expense').sort((a, b) => b.date.localeCompare(a.date));
     const aside = [st.reserve && `épargne prévue ${eur(st.reserve)}`, st.stock && `bourse ${eur(st.stock)}`].filter(Boolean);
     const account = a => `<div class="op"><div class="av">${ACC_TYPES[accType(a)][0]}</div><div class="l">${esc(a.name)}<div class="muted">${esc(a.institution)} · ${ACC_TYPES[accType(a)][1]}</div></div><div class="r">${acctAmount(a)}</div></div>`;
+    const backupAge = S.lastBackup ? Math.round((Date.parse(today()) - Date.parse(S.lastBackup)) / 864e5) : null;
     return monthBar(false)
+      + (backupAge == null || backupAge > 30 ? `<section class="card"><div class="row" style="border:0;align-items:center"><span class="warn"><b>💾 ${backupAge == null ? 'Aucune sauvegarde de vos données' : `Dernière sauvegarde il y a ${backupAge} jours`}</b>`
+        + `<div class="muted">Tout est sur ce téléphone : sans sauvegarde, une perte efface tout.</div></span>${btn('panel', 'backup:', 'Sauvegarder', 'small')}</div></section>` : '')
       + `<section class="hero"><div class="lbl">Reste à dépenser ${thisMonth ? 'ce mois-ci' : `en ${monthName(m)}`}</div><div class="big">${eur(st.spendable)}</div>`
       + (st.shortfall ? `<div style="font-weight:700">⚠️ Il manque ${eur(st.shortfall)} pour couvrir ce qui est prévu</div>` : '')
       + (st.income ? `<div class="bar" style="margin-top:12px"><i style="width:${pct}%"></i></div><div class="lbl" style="font-size:12px;margin-top:4px">${pct} % de vos entrées déjà dépensées</div>` : '')
@@ -349,7 +352,7 @@ const views = {
       return card(`${esc(i.name)} ${btn('closeInst', '', 'Fermer')}`,
         priceChart(isin, i.currency)
         + `<div style="margin:12px 0 8px">${badge(x)} <span class="muted">score ${x.score > 0 ? '+' : ''}${num(x.score)}</span></div>`
-        + ((r => `<div class="day">🎯 Conclusion</div><div><b>${esc(x.order.text)}</b></div>${x.facts ? `<div>Bilan : ${esc(x.facts)}.</div>` : ''}${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
+        + ((r => `<div class="day">🎯 Conclusion</div><div><b>${esc(x.order.text)}</b></div>${x.order.side === 'achat' && x.order.qty ? `<div style="margin:6px 0">${btn('follow', isin, '✅ Je l’ai acheté', 'small')}</div>` : ''}${x.facts ? `<div>Bilan : ${esc(x.facts)}.</div>` : ''}${r ? `<div class="muted">Règle ${r.n}, ${esc(r.title)} : ${esc(r.text)}</div>` : ''}`)(B.strategyRules(S).find(y => y.n === x.order.rule)))
         + ((ps => (ps.length ? '<div class="day">📋 Mon plan</div>' + ps.map(pl => `<div style="padding:6px 0;border-bottom:1px solid var(--line)"><b>${esc(accTag(pl.accountId))}</b>`
           + `<div>${pl.last ? `Dernier achat le ${shortDate(pl.last.date)} à ${eur(pl.last.perPart)} la part${pl.last.advice ? `, sur avis « ${esc(pl.last.advice.action)} » (règle ${pl.last.advice.rule})` : ', saisi sans avis de l’outil'}` : 'Position déclarée ou importée'}`
           + `${pl.sinceBuy != null ? ` · depuis : ${pl.sinceBuy >= 0 ? '+' : ''}${pl.sinceBuy.toFixed(1).replace('.', ',')} %` : ''}</div>`
@@ -392,9 +395,9 @@ const views = {
           + `<button class="ghost">Déplacer vers ce compte</button></form>` : ''))(byBank(cash.length ? cash : S.accounts).filter(a => a.id !== l.accountId)))).join('')
         + lines.filter(l => l.isin === isin).map(l => `<details style="margin-top:8px"><summary><b>J’ai vendu</b> <span class="muted">sur ${esc(accName(l.accountId))}</span></summary>
           <form data-form="sale"><input type="hidden" name="pos" value="${esc(`${l.accountId}|${isin}`)}">
-          <div class="grid2"><label>Quantité vendue<input name="qty" inputmode="decimal" value="${num(l.qty)}"></label><label>Montant net reçu (€)<input name="amount" inputmode="decimal" required></label></div>
+          <div class="grid2"><label>Quantité vendue<input name="qty" inputmode="decimal" value="${num(x.order?.sells?.find(v => v.accountId === l.accountId)?.qty ?? l.qty)}"></label><label>Montant net reçu (€)<input name="amount" inputmode="decimal" required></label></div>
           <input type="date" name="date" value="${t}" required><button>Enregistrer la vente</button>
-          ${empty('Quantité pré-remplie avec tout ce que vous détenez : changez-la si vous avez vendu une partie.')}</form></details>`).join('')
+          ${empty('Quantité pré-remplie avec celle de l’avis, sinon avec tout ce que vous détenez : corrigez-la si besoin.')}</form></details>`).join('')
         + (lines.some(l => l.isin === isin) ? `<details style="margin-top:8px"><summary class="muted">Déclarer une division (split)</summary><form data-form="split">
           <input type="hidden" name="isin" value="${esc(isin)}"><select name="accountId">${opts(lines.filter(l => l.isin === isin).map(l => [l.accountId, accName(l.accountId)]))}</select>
           <div class="grid2"><label>Ratio (10 pour « 10 pour 1 »)<input name="ratio" inputmode="decimal" required></label><label>Date<input type="date" name="date" value="${t}" required></label></div>
@@ -449,13 +452,13 @@ const views = {
         + empty('Chaque jour, l’outil repère les sociétés dont on parle le plus avec un ton positif, vérifie que leur cours monte, et garde les 5 meilleures. L’enveloppe du mois va à la meilleure.')
         + `<div class="muted" style="margin-top:6px"><b>${B.DISCLAIMER}</b> Les signaux ne garantissent aucun gain.</div>`)
       + fold('purchase', '➕ J’ai acheté une action', `<form data-form="purchase"><div class="muted">Chez</div>`
-        + `<div class="chips">${byBank(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(accTag(a.id)), !n)).join('')}</div>`
-        + `<label>ISIN<input name="isin" list="isins" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
+        + `<div class="chips">${byBank(cash.length ? cash : S.accounts).map((a, n) => chip('accountId', a.id, esc(accTag(a.id)), view.prefill ? a.id === view.prefill.accountId : !n)).join('')}</div>`
+        + `<label>ISIN<input name="isin" list="isins" value="${esc(view.prefill?.isin ?? '')}" placeholder="ex. FR0000120271" autocapitalize="characters" autocomplete="off" required></label>`
         + `<datalist id="isins">${S.instruments.map(i => `<option value="${esc(i.isin)}">${esc(i.name)}</option>`).join('')}</datalist>`
         + `<label>Nom <span class="muted">(seulement si c’est un nouveau titre)</span><input name="name" placeholder="ex. TotalEnergies"></label>`
-        + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" required></label></div>`
+        + `<div class="grid2"><label>Quantité<input name="qty" inputmode="decimal" value="${view.prefill ? num(view.prefill.qty) : ''}" required></label><label>Total payé, frais inclus (€)<input name="amount" inputmode="decimal" value="${view.prefill ? euros(view.prefill.amount) : ''}" required></label></div>`
         + `<label>Date<input type="date" name="date" value="${t}" required></label><button>Enregistrer l’achat</button>`
-        + `${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans Autres options. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
+        + `${view.prefill ? '<div class="warn">Rempli avec l’avis de l’outil : corrigez la quantité et le montant avec ce que vous avez vraiment payé.</div>' : ''}${empty('Le montant est retiré des espèces de ce compte. Pour un titre que vous aviez déjà, utilisez « Saisir une position existante » dans Autres options. Le cours et l’avis arrivent à la prochaine actualisation.')}</form>`)
       + `<details class="card fold" data-fold="more"${!ready || sr0 || view.trades || view.snap || view.open.has('more') ? ' open' : ''}><summary>⚙️ Autres options</summary>`
       + (view.search?.forIsin ? '' : searchCard())
       + fold('env', `Enveloppe du mois · reliquat ${eur(left)}`,
@@ -575,6 +578,13 @@ const views = {
         + empty(`Moyennes sur ${past.length} mois terminé(s). Taux d’épargne : la part des revenus qui n’est pas dépensée (10 % et plus, c’est bien). Épargne de précaution : vos livrets (${eur(safe)}) divisés par vos dépenses moyennes ; on conseille souvent 3 à 6 mois.`))
       + card('🧩 Répartition par type de compte', bars(group(a => `${ACC_TYPES[accType(a)][0]} ${ACC_TYPES[accType(a)][1]}`)))
       + card('🏛️ Répartition par banque', bars(group(a => esc(a.institution))))
+      + ((r => (!r.invested ? '' : card('🏁 Bilan de la stratégie', row('Argent investi en titres', r.invested) + (r.back ? row('Récupéré par les ventes', r.back) : '') + row('Valeur actuelle des titres', r.value)
+        + `<div class="row"><span><b>Votre résultat</b></span><span>${money(r.gain)} <span class="muted">${r.gain >= 0 ? '+' : '−'}${pct(Math.abs(r.gain), r.invested)}</span></span></div>`
+        + (r.bench ? `<div class="row"><span>Même argent, mêmes dates, dans ${esc(r.bench.name)}</span><span>${money(r.bench.gain)} <span class="muted">${r.bench.gain >= 0 ? '+' : '−'}${pct(Math.abs(r.bench.gain), r.invested)}</span></span></div>`
+          + ((d => `<div class="${d >= 0 ? 'good' : 'bad'}" style="margin:6px 0"><b>${d >= 0 ? `Vous faites mieux que l’ETF de ${eur(d)}` : `L’ETF aurait fait mieux de ${eur(-d)}`}</b></div>`)(r.gain - r.bench.gain))
+          + (r.bench.early ? empty(`Les achats d’avant le ${shortDate(r.bench.from)} sont comparés au premier cours connu de l’ETF.`) : '')
+          : empty('Comparaison indisponible : suivez l’ETF Amundi MSCI World (CW8) dans Bourse, puis actualisez.'))
+        + empty('Résultat = valeur actuelle + ventes − argent investi, dividendes non compris. L’ETF fait le même calcul, comme si chaque achat et chaque vente avaient été faits sur lui.'))))(B.strategyReport(S, t)))
       + (vals.length ? card('📊 Bourse', row('Argent investi (prix de revient)', cost) + row('Valeur actuelle des titres', worth)
         + `<div class="row"><span>Plus-value latente</span>${money(latent)}</div><div class="row"><span>Plus-value déjà encaissée (ventes)</span>${money(realized)}</div>`
         + (divs ? `<div class="row"><span>Dividendes reçus (12 mois)</span>${money(divs)}</div>` : '')
@@ -600,7 +610,7 @@ const views = {
           + (!canNotify() ? empty('Sur iPhone : ajoutez d’abord l’app à l’écran d’accueil, puis ouvrez-la depuis l’icône.')
             : notifOn ? `<div style="margin:0 0 6px 54px">${btn('testNotif', '', 'Envoyer un essai', 'small ghost')}</div>`
               : Notification.permission === 'denied' ? empty('Refusées dans les réglages du téléphone : autorisez-les pour cette app.') : '')
-        + item('backup:', '💾', 'Sauvegarde et export', 'sauvegarde chiffrée, restauration, fichier Excel'))
+        + item('backup:', '💾', 'Sauvegarde et export', S.lastBackup ? `dernière sauvegarde le ${shortDate(S.lastBackup)}` : 'aucune sauvegarde pour l’instant'))
       + card('Données', empty('Tout est enregistré sur ce téléphone uniquement. Pensez à faire une sauvegarde de temps en temps.')
         + `<div class="grid2" style="margin-top:10px">${btn('demo', '', 'Charger la démo', 'ghost')}${btn('reset', '', 'Tout effacer', 'danger')}</div>`);
   },
@@ -682,6 +692,12 @@ const actions = {
   release: id => { if (confirm('Libérer le reliquat ? Il redevient dépensable ce mois.')) B.releaseEnvelope(S, id); },
   inst: isin => { view.inst = isin; scrollTo(0, 0); },
   closeInst: () => { view.inst = null; },
+  follow: isin => {
+    const o = B.suggestions(S, today()).find(y => y.isin === isin)?.order;
+    if (!o?.qty) return;
+    view.prefill = { isin, accountId: o.accountId, qty: o.qty, amount: o.amount };
+    view.inst = null; view.open.add('purchase'); view.focusPurchase = true;
+  },
   refreshAll: async () => {
     B.seedEtfs(S);
     const t = today(), errs = [...await refreshMarket(S, t)];
@@ -820,6 +836,7 @@ const forms = {
   purchase: f => {
     const x = B.suggestions(S, today()).find(y => y.isin === String(f.isin).trim().toUpperCase()); // the advice in force, kept with the purchase
     view.inst = B.addPurchase(S, { ...f, qty: decimal(f.qty), cents: positive(f.amount), advice: x && ['Acheter', 'Renforcer'].includes(x.action) ? { action: x.action, rule: x.order.rule } : undefined });
+    view.prefill = null;
   },
   cash: f => { for (const [k, v] of Object.entries(f)) if (k.startsWith('c_') && String(v).trim()) B.setCash(S, k.slice(2), f.date, parseEur(v)); },
   split: f => B.addSplit(S, f.accountId, f.isin, f.date, decimal(f.ratio)),
@@ -857,7 +874,7 @@ const forms = {
     const { rows, errors } = B.parseCsv(await readText(form.file.files[0]));
     view.preview = { accountId: f.accountId, rows: B.importPreview(S, f.accountId, rows), errors };
   },
-  backup: async f => download(`budget-sauvegarde-${today()}.json`, await B.encryptBackup(S, f.pw), 'application/json'),
+  backup: async f => { download(`budget-sauvegarde-${today()}.json`, await B.encryptBackup(S, f.pw), 'application/json'); S.lastBackup = today(); },
   restore: async (f, form) => {
     const next = await B.decryptBackup(await readText(form.file.files[0]), f.pw);
     if (confirm(`Restaurer ${next.accounts.length} compte(s) et ${next.ops.length} opération(s) ? Les données actuelles seront remplacées.`)) S = next;
@@ -871,6 +888,7 @@ function render() {
   if (B.settleDue(S, today())) save(); // due items are paid on their date, no button to press
   app.innerHTML = (!S.accounts.length && view.tab !== 'settings' ? onboarding() : views[view.tab]()) + sheet();
   if (view.focusAmount) { view.focusAmount = false; app.querySelector('.sheet [name=amount]')?.focus(); }
+  if (view.focusPurchase) { view.focusPurchase = false; app.querySelector('[data-form="purchase"]')?.scrollIntoView({ block: 'center' }); }
   for (const b of document.querySelectorAll('nav button')) b.toggleAttribute('aria-current', b.dataset.tab === view.tab);
   document.querySelector(`nav [data-tab="${view.tab}"]`).setAttribute('aria-current', 'page');
 }

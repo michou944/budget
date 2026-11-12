@@ -980,3 +980,18 @@ test('After a purchase the line is not reinforced again for 30 days, and its pla
   assert.equal(pl.last.perPart, 12000); assert.deepEqual(pl.last.advice, { action: 'Renforcer', rule: 7 });
   assert.equal(pl.pru, Math.round(pru)); assert.equal(pl.lossAt, Math.round(pru * 0.8)); assert.equal(Math.round(pl.sinceBuy), 0);
 });
+
+test('Strategy report: result of the titles against the same money at the same dates in a world ETF', () => {
+  const s = withInstruments();
+  B.saveInstrument(s, { isin: CW8, name: 'CW8', symbol: 'CW8.PAR', currency: 'EUR' });
+  B.setHistory(s, CW8, closes(200, 1), 'test', T); // 150 € fifty days ago, 190 € ten days ago, 200 € now
+  B.addPurchase(s, { accountId: 'b', isin: ETF, date: dateBack(50), qty: 10, cents: 100000 });
+  B.addSale(s, 'b', ETF, dateBack(10), 2, 30000);
+  B.setQuote(s, ETF, 110, T);
+  const r = B.strategyReport(s, T);
+  assert.deepEqual([r.invested, r.back, r.value, r.gain], [100000, 30000, 88000, 18000]);
+  const bench = Math.round((100000 / 150 - 30000 / 190) * 200);
+  assert.equal(r.bench.value, bench); assert.equal(r.bench.gain, bench + 30000 - 100000); assert.equal(r.bench.early, false);
+  delete s.history[CW8];
+  assert.equal(B.strategyReport(s, T).bench, null);
+});

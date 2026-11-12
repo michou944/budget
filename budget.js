@@ -461,6 +461,29 @@ export function linePlan(s, today, isin) {
       trailAt: p.horizon < 5 && hi ? Math.round(hi * (1 - r.trail / 100) * 100) / 100 : null };
   });
 }
+// What the titles earned (value + sales − money put in, dividends aside), and the same money at the same dates in a world ETF.
+const BENCH = ['LU1681043599', 'IE00B4L5Y983'];
+export function strategyReport(s, today) {
+  const snaps = s.snapshots ?? {}, flows = [];
+  for (const sn of Object.values(snaps)) for (const l of sn.lines) flows.push({ date: sn.date, cents: l.cost });
+  for (const o of s.ops) {
+    if (o.kind !== 'invest' || !o.isin || !o.qty || o.split) continue;
+    const sn = snaps[o.accountId];
+    if (sn && !(o.date > sn.date || (o.seq ?? 0) > (sn.seq ?? 0))) continue; // already inside the imported statement
+    flows.push({ date: o.date, cents: o.qty > 0 ? (o.cost ?? -o.amount) : -o.amount });
+  }
+  const invested = sum(flows.filter(f => f.cents > 0), f => f.cents), back = -sum(flows.filter(f => f.cents < 0), f => f.cents);
+  const value = sum(valuation(s, today), l => l.value ?? l.cost), gain = value + back - invested;
+  const bi = BENCH.find(isin => s.history[isin]?.length > 1 && s.instruments.find(i => i.isin === isin)?.currency === 'EUR');
+  let bench = null;
+  if (bi && invested) {
+    // shortcut: a flow older than the ETF's known prices uses its first price, flagged as « early »
+    const h = s.history[bi], at = d => (h.filter(([t]) => t <= d).at(-1) ?? h[0])[1];
+    const now = Math.round(flows.reduce((u, f) => u + f.cents / at(f.date), 0) * h.at(-1)[1]);
+    bench = { name: s.instruments.find(i => i.isin === bi).name, value: now, gain: now + back - invested, from: h[0][0], early: flows.some(f => f.date < h[0][0]) };
+  }
+  return { invested, back, value, gain, bench };
+}
 export const realizedGain = (s, isin) => book(s).filter(p => p.isin === isin).reduce((a, p) => a + p.realized, 0);
 
 // Decision journal: what I decided, why, at what price and what the tool said; reviewed later against the current price.
