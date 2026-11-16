@@ -22,6 +22,15 @@ export function emptyState() {
 // fee in cents per order, fxPct = conversion cost on non-EUR orders, targets = {isin: % of portfolio}
 const defaultProfile = () => ({ style: 'long', horizon: 10, risk: 'equilibre', driftPts: 5, fee: 100, fxPct: 0.25, maxWeight: 10, targets: {} });
 
+// All or nothing: runs `change`; if it fails half-way, the error carries `.state`, the data put back exactly as they were.
+export async function allOrNothing(s, change) {
+  const before = JSON.stringify(s);
+  try { await change(); }
+  catch (e) { throw Object.assign(e instanceof Error ? e : new Error(String(e)), { state: validateState(JSON.parse(before)) }); }
+}
+// Data worth keeping aside before they are replaced: something was entered, and it is not the demo.
+export const worthKeeping = s => !s.isDemo && (s.accounts.length > 0 || s.ops.length > 0);
+
 export function validateState(x) {
   if (x?.version === 1 && x.settings) { // v1 → v2: market data (lot 2)
     Object.assign(x, { version: 2, instruments: [], quotes: {}, fx: {}, requestLog: [] });
@@ -1044,14 +1053,18 @@ export function markNotified(s, sent, today) {
 
 // ---- import ----
 
+// « 1 234,56 », « -1.234,56 », « 1234.50 » and « -12,5 » are read. « 1,234.56 » (US style) and « -1.234 » (thousands or
+// decimals?) are refused, never guessed: the line is listed as unreadable.
 const parseAmount = v => {
   let t = String(v ?? '').replace(/[\s €]/g, '');
+  if (/,.*\.|,.*,|^[^,]*\.\d{3}$/.test(t)) return NaN;
   if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
   return t ? Math.round(Number(t) * 100) : NaN;
 };
+const realDate = iso => { const d = new Date(`${iso}T12:00:00Z`); return Number.isFinite(d.getTime()) && d.toISOString().slice(0, 10) === iso ? iso : null; }; // « 31/02 » is no date
 const parseDate = v => {
   const t = String(v ?? '').trim(), fr = t.match(/^(\d{2})[/.-](\d{2})[/.-](\d{4})$/), compact = t.match(/^(\d{4})(\d{2})(\d{2})$/);
-  return fr ? `${fr[3]}-${fr[2]}-${fr[1]}` : compact ? `${compact[1]}-${compact[2]}-${compact[3]}` : /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : null;
+  return realDate(fr ? `${fr[3]}-${fr[2]}-${fr[1]}` : compact ? `${compact[1]}-${compact[2]}-${compact[3]}` : /^\d{4}-\d{2}-\d{2}$/.test(t) ? t : '');
 };
 
 // Splits a ;- or ,-separated file; headers are lower-cased without accents.
@@ -1340,5 +1353,6 @@ export function demoState(today) {
   addNews(s, 'LU1681043599', { title: 'Amundi annonce la fusion de deux ETF MSCI World (fictif)', url: 'https://example.com/demo-fusion', source: 'démo (fictif)', publishedAt: ago(2) }, today);
   addNews(s, 'IE00B4L5Y983', { title: 'Les ETF monde poursuivent leur collecte (fictif)', url: 'https://example.com/demo-collecte', source: 'démo (fictif)', publishedAt: ago(1) }, today);
   addNews(s, 'IE00B4L5Y983', { title: 'Baisse des frais sur une gamme d’ETF (fictif)', url: 'https://example.com/demo-frais', source: 'démo (fictif)', publishedAt: ago(12) }, today);
+  s.isDemo = true;
   return s;
 }

@@ -12,11 +12,14 @@ function load() {
   if (!raw) return B.emptyState();
   try { return B.validateState(JSON.parse(raw)); } catch {
     localStorage.setItem(KEY + '.illisible', raw); // keep the unreadable copy rather than overwrite it
-    alert('Données locales illisibles, mises de côté. Restaurez une sauvegarde.');
+    alert('Données locales illisibles : une copie est gardée à part (Réglages → Sauvegarde → Télécharger la copie illisible). Restaurez une sauvegarde.');
     return B.emptyState();
   }
 }
 const save = () => localStorage.setItem(KEY, JSON.stringify(S));
+// Before the data are replaced (demo, restore) the current ones are kept aside, so a wrong tap can be undone.
+const keepBefore = () => { if (B.worthKeeping(S)) localStorage.setItem(KEY + '.avant', JSON.stringify(S)); };
+const savedCopy = (suffix, parse) => { try { const raw = localStorage.getItem(KEY + suffix); return raw && (parse ? JSON.parse(raw) : raw); } catch { return null; } };
 
 // ---- formatting helpers ----
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
@@ -173,6 +176,9 @@ function sheet() {
         <button>Télécharger une sauvegarde chiffrée</button></form>
         <form data-form="restore" style="margin-top:16px"><div class="muted">Restaurer une sauvegarde (remplace les données de ce téléphone)</div><input type="file" name="file" accept=".json,application/json" required>
         <input type="password" name="pw" placeholder="Mot de passe de la sauvegarde" autocomplete="current-password" required><button class="ghost">Restaurer</button></form>
+        ${((prev, bad) => (prev || bad ? '<div class="warn" style="margin-top:16px"><b>Données mises de côté</b>'
+          + (prev ? `<div class="muted">Avant le dernier remplacement : ${prev.accounts?.length ?? 0} compte(s), ${prev.ops?.length ?? 0} opération(s).</div>${btn('undoReplace', '', 'Revenir aux données d’avant', 'ghost')}` : '')
+          + (bad ? `<div class="muted">Une copie illisible a été gardée.</div>${btn('downloadBad', '', 'Télécharger la copie illisible', 'ghost')}` : '') + '</div>' : ''))(savedCopy('.avant', true), savedCopy('.illisible'))}
         <div style="margin-top:16px;display:grid;gap:10px">${btn('csv', '', 'Exporter les mouvements (CSV, pour Excel : lecture seule, ne sert pas à restaurer)', 'ghost')}${cancelBtn}</div>`,
   }[kind]?.();
   return body ? `<div class="sheet-bg" data-act="closeSheet"></div><div class="sheet" role="dialog"><div class="grip"></div>${body}</div>` : '';
@@ -809,8 +815,19 @@ const actions = {
     for (const x of [...S.ops, ...S.recurring]) if (x.categoryId === id) x.categoryId = null;
   },
   csv: () => download(`operations-${today()}.csv`, '﻿' + B.opsCsv(S), 'text/csv'),
-  demo: () => { if (confirm('Remplacer les données par la démonstration fictive ?')) { S = B.demoState(today()); view.tab = 'dash'; } },
-  reset: () => { if (confirm('Effacer toutes les données de ce téléphone ?')) S = B.emptyState(); },
+  demo: () => { if (confirm('Remplacer les données par la démonstration fictive ? Vos données actuelles sont mises de côté (Sauvegarde → Revenir aux données d’avant).')) { keepBefore(); S = B.demoState(today()); view.tab = 'dash'; } },
+  reset: () => {
+    if (!confirm(`Effacer toutes les données de ce téléphone ? ${S.lastBackup ? `Dernière sauvegarde : ${S.lastBackup}.` : 'Aucune sauvegarde : tout sera perdu.'}`)) return;
+    for (const k of ['.avant', '.illisible']) localStorage.removeItem(KEY + k); // erasing really erases
+    S = B.emptyState();
+  },
+  undoReplace: () => {
+    const prev = savedCopy('.avant', true);
+    if (!prev || !confirm(`Revenir aux données d’avant (${prev.accounts?.length ?? 0} compte(s), ${prev.ops?.length ?? 0} opération(s)) ? Les données actuelles seront mises de côté.`)) return;
+    const back = B.validateState(prev);
+    keepBefore(); S = back;
+  },
+  downloadBad: () => download('boussole-donnees-illisibles.json', savedCopy('.illisible') ?? '', 'application/json'),
 };
 
 const forms = {
@@ -906,7 +923,7 @@ const forms = {
   backup: async f => { download(`budget-sauvegarde-${today()}.json`, await B.encryptBackup(S, f.pw), 'application/json'); S.lastBackup = today(); },
   restore: async (f, form) => {
     const next = await B.decryptBackup(await readText(form.file.files[0]), f.pw);
-    if (confirm(`Restaurer ${next.accounts.length} compte(s) et ${next.ops.length} opération(s) ? Les données actuelles seront remplacées.`)) S = next;
+    if (confirm(`Restaurer ${next.accounts.length} compte(s) et ${next.ops.length} opération(s) ? Les données actuelles seront mises de côté.`)) { keepBefore(); S = next; }
   },
 };
 
@@ -922,7 +939,8 @@ function render() {
 }
 
 async function run(fn) {
-  try { await fn(); save(); } catch (err) { alert(err.message); }
+  // all or nothing (a refresh running at the very same moment is lost and redone at the next opening)
+  try { await B.allOrNothing(S, fn); save(); } catch (err) { if (err.state) S = err.state; alert(err.message); }
   render();
   notify();
 }

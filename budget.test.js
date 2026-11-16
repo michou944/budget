@@ -1199,3 +1199,36 @@ test('Budget audit: an edited payment re-checks its link, a near-identical manua
   B.saveOp(s, { accountId: 'a', date: '2026-11-10', kind: 'expense', cents: 4210, label: 'Carrefour courses' });
   assert.equal(B.importPreview(s, 'a', [{ date: '2026-11-11', amount: -4210, label: 'CB CARREFOUR 11/11' }])[0].dup, 'saisie manuelle identique');
 });
+
+test('Audit 1: a change that fails half-way leaves nothing behind, a change that works is kept', async () => {
+  const ISIN = 'FR0000120271', s = B.emptyState();
+  s.accounts.push({ id: 'p', name: 'PEA', opening: 0, type: 'PEA' }, { id: 'c', name: 'CTO', opening: 0, type: 'CTO' });
+  B.saveInstrument(s, { isin: ISIN, name: 'Total', currency: 'EUR' });
+  for (const a of ['p', 'c']) B.addHolding(s, a, ISIN, '2025-01-01', 10, 50000);
+  let err;
+  try { await B.allOrNothing(s, () => { B.addSale(s, 'p', ISIN, T, 5, 30000); B.addSale(s, 'c', ISIN, T, 50, 30000); }); } catch (e) { err = e; }
+  assert.match(err.message, /supérieure/);
+  assert.equal(s.ops.filter(o => o.qty < 0).length, 1); // the half-done change, as the app used to keep it
+  const r = err.state; assert.equal(r.ops.filter(o => o.qty < 0).length, 0); // put back as it was
+  B.addSale(r, 'p', ISIN, T, 5, 30000); B.addSale(r, 'c', ISIN, T, 5, 30000); // the corrected form, sent again
+  assert.equal(r.ops.filter(o => o.qty < 0).length, 2); assert.equal(B.positions(r).find(p => p.accountId === 'p').qty, 5);
+  await B.allOrNothing(s, () => B.addSale(s, 'p', ISIN, T, 1, 100)); assert.equal(s.ops.filter(o => o.qty < 0).length, 2);
+});
+
+test('Audit 2: ambiguous amounts and impossible dates in a statement are refused, never guessed', () => {
+  const amt = a => B.parseCsv(`date;libelle;montant\n03/11/2026;Test;${a}`).rows[0]?.amount ?? null;
+  const ok = { '-1234,56': -123456, '-1 234,56': -123456, '-1.234,56': -123456, '1234.50': 123450, '-12,5': -1250, '12.5': 1250 };
+  for (const [a, c] of Object.entries(ok)) assert.equal(amt(a), c, a);
+  for (const a of ['1,234.56', '-1.234', '1,234,567', '']) assert.equal(amt(a), null, a); // US style, thousands or decimals ?, listed as unreadable
+  assert.equal(B.parseCsv('date;libelle;montant\n03/11/2026;T;1,234.56').errors.length, 1);
+  const day = d => B.parseCsv(`date;libelle;montant\n${d};T;-1,00`).rows[0]?.date ?? null;
+  assert.equal(day('03/11/2026'), '2026-11-03'); assert.equal(day('29/02/2028'), '2028-02-29'); assert.equal(day('20261103'), '2026-11-03');
+  for (const d of ['31/02/2026', '99/99/2026', '29/02/2027', '2026-13-01', '03/11/26']) assert.equal(day(d), null, d);
+});
+
+test('Audit 3: only real data are kept aside before a replacement, the demo never is', () => {
+  assert.equal(B.worthKeeping(B.emptyState()), false);
+  assert.equal(B.worthKeeping(B.demoState(T)), false);
+  assert.equal(B.worthKeeping(base()), true);
+  assert.equal(B.validateState(JSON.parse(JSON.stringify(B.demoState(T)))).isDemo, true); // the flag survives a save
+});
