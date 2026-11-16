@@ -1041,7 +1041,7 @@ test('Checks: savings near their ceiling, with the room left elsewhere', () => {
   s.accounts.find(a => a.id === 'l').opening = 2200000; // « Livret » named: an other savings account, no ceiling
   s.accounts.push({ id: 'la', name: 'Livret A', institution: 'BCP', opening: 2200000, savings: true }, { id: 'dd', name: 'LDDS', institution: 'BCP', opening: 200000, savings: true });
   const c = B.checks(s, T).join('\n');
-  assert.match(c, /Livret A : 22 ?000,00 € sur 22 ?950,00 € de plafond\. Place restante : LDDS \(10 ?000,00 €\)/);
+  assert.match(c, /Livret A : 22 000,00 € sur 22 950,00 € de plafond\. Place restante : LDDS \(10 000,00 €\)/);
   assert.doesNotMatch(c, /LDDS : /);
 });
 
@@ -1262,4 +1262,29 @@ test('Audit 9: a label starting with = + - @ is exported as text, not as a formu
   const rows = B.opsCsv(s).split('\n').slice(1);
   for (const r of rows.slice(0, 4)) assert.match(r, /;"'[=+@-]/);
   assert.match(rows[4], /;"Courses 5 € - Carrefour";/); // a normal label is untouched
+});
+
+test('Audit 13: closed-app alerts follow the 40 biggest titles, send no amount, and the owner is told', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'c', name: 'CTO', opening: 0, type: 'CTO' });
+  const isin = k => `FR${String(k).padStart(9, '0')}0`;
+  for (let k = 0; k < 45; k++) {
+    B.saveInstrument(s, { isin: isin(k), name: `T${k}`, currency: 'EUR' });
+    s.instruments.at(-1).ysym = `T${k}.PA`;
+    B.setHistory(s, isin(k), closes(100, 0), 't', T);
+    B.addHolding(s, 'c', isin(k), '2025-01-01', k + 1, (k + 1) * 10000); // title k weighs k + 1 times the first
+  }
+  const w = B.watchList(s, T);
+  assert.equal(w.length, B.WATCH_MAX); assert.equal(w[0].n, 'T44'); assert.equal(w.at(-1).n, 'T5'); // biggest first, the 5 smallest left out
+  assert.ok(w.every(x => Object.keys(x).sort().join() === 'move,n,rules,s')); // names, symbols and levels: no amount leaves the phone
+  assert.doesNotMatch(B.checks(s, T).join('\n'), /surveillés/); // alerts off: nothing to say
+  s.settings.market.push = true;
+  assert.match(B.checks(s, T).join('\n'), /seuls vos 40 plus gros titres sur 45 sont surveillés/);
+});
+
+test('Audit 11: one money format, thousands separated like on the screens', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'Livret A', opening: 2296000, savings: true });
+  assert.match(B.checks(s, T).join('\n'), /Livret A : 22 960,00 € sur 22 950,00 €/);
+  const t = withInstruments(); t.settings.profile.horizon = 3; B.addHolding(t, 'b', ETF, '2025-01-01', 20, 180000);
+  const h = closes(100, 0); h[50] = [h[50][0], 120]; h[99] = [T, 104]; B.setHistory(t, ETF, h, 't', T); // in gain, 13 % under its high: the trailing stop sells half
+  assert.match(verdict(t, ETF).order.text, /\(≈ 1 040,00 €\)/); // 10 of 20 parts at 104 €
 });

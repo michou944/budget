@@ -170,6 +170,8 @@ export function checks(s, today) {
   const pf = s.settings.profile, core = tot ? (sum(lines.filter(etfLine), l => l.value ?? l.cost) * 100) / tot : 0;
   if (tot && pf.coreMin > 0 && core < pf.coreMin) out.push(`Cœur en ETF larges : ${Math.round(core)} % de vos titres pour un objectif de ${pf.coreMin} % : les achats d’actions sont suspendus, renforcez les ETF.`);
   if (tot && pf.coreMin == null && core < 50) out.push(`Seulement ${Math.round(core)} % de vos titres en ETF larges. Repère courant : 70 % ou plus en ETF (le « cœur »). Choisissez votre objectif dans Bourse → Plus → Mon profil.`);
+  const watchable = s.instruments.filter(i => i.ysym && lines.some(l => l.isin === i.isin && l.cost > 0)).length;
+  if (s.settings.market.push && watchable > WATCH_MAX) out.push(`Alertes appli fermée : seuls vos ${WATCH_MAX} plus gros titres sur ${watchable} sont surveillés (limite du service gratuit).`);
   for (const a of s.accounts) if (a.type === 'PEA' && !a.opened) out.push(`${a.name} : indiquez sa date d’ouverture pour suivre les 5 ans du PEA.`);
   // a savings or brokerage account can rest for months: only current accounts are expected to move
   for (const x of staleAccounts(s, today)) if (x.a.liquid && !invest.includes(x.a)) out.push(`${x.a.name} : aucun mouvement depuis 30 jours. Importez un relevé ou vérifiez le solde.`);
@@ -421,6 +423,7 @@ export function cushionMonths(s, today) {
   return sum(s.accounts.filter(a => a.savings && (a.sub ?? guessSub(a.name)) !== 'av'), a => balance(s, a)) / (sum(spent, v => v) / spent.length);
 }
 
+export const WATCH_MAX = 40; // the free plan of the service allows 50 outgoing calls per run
 export function watchList(s, today) {
   const p = s.settings.profile, risk = RISK[p.risk] ?? RISK.equilibre, lines = valuation(s, today), r2 = x => Math.round(x * 100) / 100, out = [];
   for (const i of s.instruments.filter(i => i.ysym)) {
@@ -435,9 +438,9 @@ export function watchList(s, today) {
       rules.push({ above: r2(tr.sma50 * 1.12), msg: 'forte hausse : prendre une partie des bénéfices ?' });
       if (tr.first < tr.sma50) rules.push({ below: r2(tr.sma50 * 0.93), msg: 'repli dans une tendance qui monte : occasion de racheter ?' });
     }
-    out.push({ s: i.ysym, n: i.name, rules, move: 6 });
+    out.push({ w: { s: i.ysym, n: i.name, rules, move: 6 }, v: sum(mine, l => l.value ?? l.cost) }); // the value only sorts, it is never sent
   }
-  return out;
+  return out.sort((a, b) => b.v - a.v).slice(0, WATCH_MAX).map(x => x.w);
 }
 
 const checkTrade = (s, isin, qty) => {
@@ -727,7 +730,7 @@ const BROKER_FEES = [
 export const brokerFees = institution => BROKER_FEES.find(([re]) => re.test(institution ?? ''))?.[1] ?? null;
 
 export const DISCLAIMER = 'Information, pas un conseil en investissement. Aucun ordre n’est passé.';
-const euro = c => `${(c / 100).toFixed(2).replace('.', ',')} €`;
+const euro = c => `${(c / 100).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ')} €`; // « 1 254,00 € », like on the screens
 const pct = x => `${x.toFixed(1).replace('.', ',')} %`;
 
 const parts = q => `${String(q).replace('.', ',')} part${q > 1 ? 's' : ''}`;
@@ -1279,8 +1282,9 @@ export function opsCsv(s) {
   const acc = Object.fromEntries(s.accounts.map(a => [a.id, a.name])), cat = Object.fromEntries(s.categories.map(c => [c.id, c.name]));
   // a text starting with = + - @ would be run as a formula by Excel: it gets a leading apostrophe
   const q = v => { const t = String(v ?? ''); return `"${(/^[=+\-@\t\r]/.test(t) ? `'${t}` : t).replace(/"/g, '""')}"`; };
+  const matched = matchedIds(s);
   return ['date;compte;type;categorie;libelle;montant;prevue',
-    ...s.ops.filter(o => !(o.planned && matchedIds(s).has(o.id))).sort((a, b) => a.date.localeCompare(b.date)).map(o =>
+    ...s.ops.filter(o => !(o.planned && matched.has(o.id))).sort((a, b) => a.date.localeCompare(b.date)).map(o =>
       [o.date, q(acc[o.accountId]), KINDS[o.kind], q(cat[o.categoryId]), q(o.label), (o.amount / 100).toFixed(2).replace('.', ','), o.planned ? 'oui' : 'non'].join(';'))].join('\n');
 }
 
