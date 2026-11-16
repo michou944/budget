@@ -14,7 +14,7 @@ export function emptyState() {
     version: 2, accounts: [], ops: [], recurring: [], envelopes: [], dismissedAlerts: [], lastImport: null,
     categories: ['Logement', 'Alimentation', 'Santé', 'Mobilité et auto', 'Impôts', 'Loisirs', 'Abonnements', 'Divers']
       .map(name => ({ id: uid(), name, cap: 0 })),
-    settings: { reserve: 0, globalCap: 0, alertPct: 80, lowSpendable: 10000, notify: false, market: { enabled: false, avKey: '' }, profile: defaultProfile() },
+    settings: { reserve: 0, globalCap: 0, alertPct: 80, lowSpendable: 10000, notify: false, market: { enabled: false }, profile: defaultProfile() },
     instruments: [], quotes: {}, fx: {}, requestLog: [], peaks: {}, news: [], newsFetched: {}, history: {}, snapshots: {}, discovery: { date: null, items: {} }, notified: { verdicts: {}, sent: [] }, journal: [], transfersLinked: true,
   };
 }
@@ -34,7 +34,7 @@ export const worthKeeping = s => !s.isDemo && (s.accounts.length > 0 || s.ops.le
 export function validateState(x) {
   if (x?.version === 1 && x.settings) { // v1 → v2: market data (lot 2)
     Object.assign(x, { version: 2, instruments: [], quotes: {}, fx: {}, requestLog: [] });
-    x.settings.market = { enabled: false, avKey: '' };
+    x.settings.market = { enabled: false };
   }
   if (x?.version === 2 && x.settings) { // fields added with P03 and P02
     x.settings.profile ??= defaultProfile(); x.peaks ??= {}; x.news ??= []; x.newsFetched ??= {}; x.history ??= {}; x.snapshots ??= {}; x.discovery ??= { date: null, items: {} };
@@ -465,6 +465,7 @@ export function addPurchase(s, { accountId, isin, name, date, qty, cents, advice
 }
 
 // A position recorded on the wrong account (e.g. the CTO instead of the PEA) moves with its whole history.
+// Returns the net cash that moved with it (purchases are negative, sales positive): the origin account gets it back, the new one loses it.
 export function moveHolding(s, isin, fromId, toId) {
   if (fromId === toId || !s.accounts.some(a => a.id === toId)) throw new Error('Choisissez un autre compte');
   const sn = s.snapshots?.[fromId], line = sn?.lines.find(l => l.isin === isin);
@@ -472,7 +473,9 @@ export function moveHolding(s, isin, fromId, toId) {
     sn.lines = sn.lines.filter(l => l !== line);
     s.ops.push({ id: uid(), accountId: toId, date: sn.date, amount: 0, cost: line.cost, kind: 'invest', isin, qty: line.qty, label: 'Position transférée', seq: stamp(s) });
   }
-  for (const o of s.ops.filter(o => o.accountId === fromId && o.isin === isin)) Object.assign(o, { accountId: toId, seq: stamp(s) });
+  let cash = 0;
+  for (const o of s.ops.filter(o => o.accountId === fromId && o.isin === isin)) { cash += o.amount; Object.assign(o, { accountId: toId, seq: stamp(s) }); }
+  return cash;
 }
 
 // Records a sale already done at the broker: the money received lands in that account's cash, not in the household budget.
@@ -780,154 +783,169 @@ export function suggestions(s, today) {
   const etfValue = Object.entries(byIsin).reduce((n, [k, v]) => n + (isEtf(s.instruments.find(i => i.isin === k)) ? v : 0), 0);
   const hasTargets = Object.values(p.targets).some(t => t > 0);
 
-  const out = s.instruments.map(i => {
-    const isHeld = held.has(i.isin), q = s.quotes[i.isin], reasons = [];
-    const add = (pts, text, asOf, source, rule) => reasons.push({ pts, text, asOf, source, rule });
-    const none = (rule, text) => ({ side: null, qty: 0, rule, text });
-    const base = { isin: i.isin, name: i.name, held: isHeld, reasons };
-    const fxOk = i.currency === 'EUR' || !isStale(s.fx[i.currency]?.asOf, today);
-    // a missing or stale price suspends the verdict instead of guessing
-    const odd = lines.find(l => l.isin === i.isin && l.suspect);
-    if (!q || q.currency !== i.currency || isStale(q.asOf, today) || !fxOk || odd) {
-      add(0, !q ? 'Aucun cours : actualisez ou saisissez-le.' : !fxOk ? `Taux de change ${i.currency} absent ou périmé.`
-        : odd ? `Cours à vérifier : ${q.price} ${q.currency} donnerait une ligne sans rapport avec les ${euro(odd.cost)} investis (mauvaise cotation ?).`
-          : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source, 1);
-      return { ...base, action: 'Suspendu', score: 0, suspended: true, order: none(1, 'Aucune opération tant que le cours n’est pas à jour.') };
-    }
-    const t = p.targets[i.isin] ?? 0, own = lines.filter(l => l.isin === i.isin), cuts = [], allValue = byIsin[i.isin] ?? 0;
-    // what brings the title back to c % of the portfolio, the money going to the others
-    const backTo = c => (allValue ? Math.min(1, (allValue - (c * total) / 100) / allValue) : 0);
-    if (hasTargets && (t > 0 || isHeld)) {
-      if (blocked.length) add(0, `Allocation non calculée : cours manquant ou périmé pour ${blocked.join(', ')}.`, undefined, undefined, 1);
-      else {
-        const w = weight(i.isin), gap = t - w, far = Math.abs(gap);
-        const pts = far < p.driftPts ? 0 : Math.sign(gap) * (far >= 2 * p.driftPts ? 2 : 1);
-        add(pts, `Poids ${pct(w)} pour une cible de ${pct(t)}${pts ? ` : ${pts > 0 ? 'sous' : 'sur'}-pondéré de ${far.toFixed(1).replace('.', ',')} points` : ', dans la tolérance'}.`, undefined, undefined, 2);
-        if (pts < 0 && t > 0) cuts.push({ rule: 2, share: backTo(t), ls: own });
-      }
-    }
-    const tr = trend(s, i.isin), active = p.style === 'actif';
-    let takeProfit = 0;
-    if (tr) {
-      const gap = (q.price / tr.sma50 - 1) * 100, longUp = tr.first < tr.sma50;
-      // active style: a dip inside a rising trend is a chance to buy back, instead of a sell signal
-      if (active && gap <= -7 && longUp) add(2, `Repli de ${pct(-gap)} sous sa moyenne 50 jours alors que la tendance de fond monte : occasion de (r)acheter.`, tr.asOf, q.source, 6);
-      else {
-        const up = q.price >= tr.sma50;
-        add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source, 7);
-        if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source, 7);
-      }
-      if (active && isHeld && gap >= 12) takeProfit = gap;
-    } else add(0, 'Tendance inconnue : historique insuffisant (actualisez en ligne).');
-    const recent = s.news.filter(n => n.isin === i.isin && dayNum(today) - dayNum(n.publishedAt) <= 14);
-    const tones = recent.map(n => n.sentiment).filter(Number.isFinite);
-    if (tones.length >= 2) {
-      const avg = tones.reduce((a, b) => a + b, 0) / tones.length;
-      add(avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0, `Ton des actualités ${avg > 0.2 ? 'positif' : avg < -0.2 ? 'négatif' : 'neutre'} (${tones.length} articles sur 14 jours).`, recent[0].publishedAt, 'Marketaux', 7);
-    } else if (!recent.length && !s.discovery?.items?.[i.isin]) add(0, 'Aucune actualité récente.');
-    const found = s.discovery?.items?.[i.isin];
-    if (found) add(found.tone >= 0.2 ? 1 : 0, `Repéré par l’outil : ${found.docs} articles cette semaine, ton ${found.tone >= 0.2 ? 'positif' : 'plutôt neutre'} (${found.tone.toFixed(2).replace('.', ',')}).`, found.asOf, 'Marketaux', 7);
-    const notable = recent.filter(n => NOTABLE.test(n.title));
-    for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source, 8);
-    let limitHit = false, lossAlert = null;
-    const mine = lines.filter(l => l.isin === i.isin && l.cost > 0), gainAll = mine.reduce((a, l) => a + l.gain, 0);
-    const lastSale = l => s.ops.filter(o => o.accountId === l.accountId && o.isin === i.isin && o.qty < 0 && dayNum(today) - dayNum(o.date) < SALE_PAUSE).map(o => o.date).sort().at(-1);
-    const cooled = own.length > 0 && own.every(lastSale);
-    const resume = cooled ? new Date(Date.parse(own.map(lastSale).sort().at(-1)) + SALE_PAUSE * 864e5).toISOString().slice(0, 10) : null;
-    if (cooled) add(0, `Ligne déjà allégée : pas de nouvelle vente partielle avant le ${dayMonth(resume)}.`, undefined, undefined, 10);
-    const lastBuy = l => s.ops.filter(o => o.accountId === l.accountId && o.isin === i.isin && o.qty > 0 && !['Position existante', 'Position transférée'].includes(o.label)
-      && dayNum(today) - dayNum(o.date) < SALE_PAUSE).map(o => o.date).sort().at(-1);
-    const bought = own.map(lastBuy).filter(Boolean).sort().at(-1), buyResume = bought && new Date(Date.parse(bought) + SALE_PAUSE * 864e5).toISOString().slice(0, 10);
-    if (bought) add(0, `Ligne renforcée le ${dayMonth(bought)} : pas de nouvel achat avant le ${dayMonth(buyResume)}.`, undefined, undefined, 10);
-    if (takeProfit && gainAll > 0 && !cooled) { // active style: sell part of a strong rise, buy back later on a dip
-      limitHit = true;
-      const pea = mine.every(l => s.accounts.find(a => a.id === l.accountId)?.type === 'PEA');
-      add(-2, `Forte hausse : ${pct(takeProfit)} au-dessus de sa moyenne 50 jours, avec ${euro(gainAll)} de plus-value : prendre une partie des bénéfices (vendre environ un tiers).`
-        + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposable.'), undefined, undefined, 6);
-      cuts.push({ rule: 6, share: 1 / 3, ls: own });
-    }
-    for (const l of mine) {
-      if (lastSale(l)) continue;
-      const gain = ((l.value - l.cost) * 100) / l.cost, hi = peakSince(s, i.isin, lineStart(s, l.accountId, i.isin));
-      const drop = hi ? ((hi - q.price) * 100) / hi : 0;
-      if (gain <= -risk.maxLoss) { lossAlert = Math.min(lossAlert ?? 0, gain); add(0, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}) : à examiner, pas de vente automatique.`, undefined, undefined, 4); }
-      else if (p.horizon < 5 && gain > 0 && drop >= risk.trail) {
-        limitHit = true;
-        cuts.push({ rule: 5, share: 0.5, ls: [l] });
-        add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`, undefined, undefined, 5);
-      }
-    }
-    // concentration limit per line: above it, never « Renforcer », whatever the other signals say
-    const etf = isFund(i); // a broad fund spreads its own risk: no limit per line
-    const overCap = isHeld && !etf && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
-    if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`, undefined, undefined, 3);
-    const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
-    // a risk limit of the profile always leads to reducing the line, whatever the other signals say
-    const buyAt = etf ? (p.monthly > 0 ? Infinity : 1.5) : 2; // 13. with a monthly plan, ETFs are bought by the plan, not on signals
-    const ind0 = etf ? null : indicators(s, i.isin), downLong = !!ind0?.sma200 && q.price < ind0.sma200;
-    const sat = !etf && p.coreMin > 0 && total > 0 && ((total - etfValue) * 100) / total >= 100 - p.coreMin;
-    if (score >= buyAt && downLong) add(0, `Sous sa moyenne 200 jours (${ind0.sma200.toFixed(2).replace('.', ',')} ${i.currency}) : pas d’achat tant que la tendance de fond baisse.`, undefined, undefined, 11);
-    if (score >= buyAt && sat) add(0, `Actions à ${Math.round(((total - etfValue) * 100) / total)} % de vos titres, au-delà de vos ${100 - p.coreMin} % : pas de nouvel achat d’action.`, undefined, undefined, 12);
-    const canBuy = score >= buyAt && !downLong && !sat;
-    // 3. long term: price and news signals alone never sell, they ask for a look; risk rules and targets still act
-    const longSignal = isHeld && p.style !== 'actif' && !limitHit && !cooled && !cuts.length && score <= -2;
-    const action = notable.length || lossAlert != null || longSignal ? 'À examiner'
-      : isHeld ? (p.style === 'actif' && score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : canBuy && !overCap && !bought ? 'Renforcer' : 'Conserver')
-        : canBuy ? 'Acheter' : 'Attendre';
-    // everything the verdict merged, in one sentence
-    const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
-    const facts = [!tr ? 'tendance inconnue' : q.price >= tr.sma50 ? 'tendance haussière' : 'tendance baissière',
-      notable.length ? 'actualité importante à lire' : toneAvg != null ? `actualités ${toneAvg > 0.2 ? 'positives' : toneAvg < -0.2 ? 'négatives' : 'neutres'}` : recent.length ? `${recent.length} actualité(s) sans ton mesuré` : 'pas d’actualité récente',
-      lossAlert != null ? 'perte maximale dépassée' : cuts.some(c => c.rule === 5) ? 'stop suiveur atteint' : cuts.some(c => c.rule === 6) ? 'forte hausse à encaisser' : cooled ? 'ligne déjà allégée' : isHeld ? 'risque dans vos limites' : null,
-      overCap ? 'ligne au-delà de votre limite' : alloc && t > 0 ? (alloc.pts > 0 ? 'sous sa part visée' : alloc.pts < 0 ? 'au-dessus de sa part visée' : 'à sa part visée') : null].filter(Boolean).join(', ');
-    // the conclusion's frame: what it still lacks, what would overturn it, and how much data stands behind it
-    const ind = indicators(s, i.isin), level = ind?.sma200 ?? ind?.sma50, two = v => v.toFixed(2).replace('.', ',');
-    const missing = [!ind?.sma200 && 'Moins d’un an de cours : moyenne 200 jours indisponible.', !recent.length && 'Aucune actualité récente analysée.',
-      'Fondamentaux (chiffre d’affaires, résultats, valorisation) non analysés : pas de source gratuite fiable.'].filter(Boolean);
-    const invalidation = !level ? null : ['Vendre', 'Alléger'].includes(action)
-      ? `Revoir si le cours repasse au-dessus de ${two(ind.sma50 ?? level)} ${i.currency} (moyenne 50 jours).`
-      : `Revoir si le cours passe sous ${two(level)} ${i.currency} (moyenne ${ind.sma200 ? 200 : 50} jours)${notable.length ? ' ou après lecture de l’actualité signalée' : ''}.`;
-    const confidence = ind?.sma200 && tones.length >= 2 ? 'Élevée' : ind?.sma50 ? 'Moyenne' : 'Faible';
-    const worst = [...reasons].filter(r => r.pts < 0).sort((a, b) => a.pts - b.pts)[0]?.rule ?? 7;
-    let order = overCap ? none(3, 'Aucun achat : la ligne dépasse votre limite. Aucune vente demandée.') : none(7, 'Aucune opération : ni signal d’achat ni signal de vente.');
-    if (cooled && action === 'Conserver') order = none(10, `Aucune vente pour l’instant : ligne déjà allégée, prochaine révision le ${dayMonth(resume)}.`);
-    if ((downLong || sat) && score >= buyAt && ['Conserver', 'Attendre'].includes(action)) order = none(sat ? 12 : 11, sat
-      ? 'Aucun achat d’action : la part en actions dépasse votre objectif. Renforcez plutôt le cœur (ETF larges).' : 'Aucun achat : le cours est sous sa moyenne 200 jours, la tendance de fond baisse.');
-    if (bought && action === 'Conserver' && score >= buyAt) order = none(10, `Aucun renfort pour l’instant : ligne renforcée le ${dayMonth(bought)}, prochaine révision le ${dayMonth(buyResume)}.`);
-    if (action === 'À examiner') order = notable.length ? none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.')
-      : lossAlert == null ? none(7, 'Signaux de baisse marqués : à examiner. En long terme, l’outil ne vend pas sur ces seuls signaux.')
-      : none(4, `Aucune vente automatique : perte de ${pct(-lossAlert)}, au-delà de votre limite de ${risk.maxLoss} %. Regardez les résultats et les actualités de la société avant de décider.`);
-    if (action === 'Vendre' || action === 'Alléger') {
-      if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
-      // the strongest rule triggered sets the size; a signal alone sells a third
-      // the same rule hit on several accounts (a stop on the PEA and on the CTO) acts on all of them at once
-      const merged = Object.values(cuts.reduce((m, c) => { m[c.rule] = m[c.rule] ? { ...m[c.rule], ls: [...new Set([...m[c.rule].ls, ...c.ls])] } : { ...c }; return m; }, {}));
-      const cut = action === 'Vendre' ? { rule: 7, share: 1, ls: own } : merged.sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
-      const acc = l => s.accounts.find(x => x.id === l.accountId), pea = l => acc(l)?.type === 'PEA';
-      const mk = (l, x) => {
-        const a = acc(l), qty = cut.share === 1 ? l.qty : Math.min(l.qty, a?.fractional || !Number.isInteger(l.qty) ? Math.floor(x * 1000) / 1000 : Math.ceil(x - 1e-9));
-        return { accountId: l.accountId, name: a?.name ?? '?', qty, amount: Math.round((l.value * qty) / l.qty), gain: Math.round(((l.value - l.cost) * qty) / l.qty), pea: pea(l),
-          fee: a?.feeFixed ?? brokerFees(a?.institution)?.fixed ?? p.fee };
-      };
-      // held on a PEA and a CTO: in gain, sell on the PEA first (no tax there); in loss, on the CTO (the loss lowers the tax on other gains)
-      const inGain = cut.ls.reduce((n, l) => n + l.value - l.cost, 0) >= 0, mixed = cut.ls.some(pea) && cut.ls.some(l => !pea(l));
-      let left = cut.ls.reduce((n, l) => n + l.qty, 0) * cut.share;
-      const sells = (mixed && cut.share < 1 ? [...cut.ls].sort((a, b) => (pea(b) - pea(a)) * (inGain ? 1 : -1)).map(l => { const x = Math.min(l.qty, left); left -= x; return mk(l, x); })
-        : cut.ls.map(l => mk(l, l.qty * cut.share))).filter(x => x.qty > 0);
-      const how = [limitOrder('vente', q.price, i.currency),
-        mixed && cut.share < 1 ? (inGain ? 'Sur le PEA d’abord : la plus-value n’y est pas imposée.' : 'Sur le CTO d’abord : la moins-value y réduit l’impôt sur vos autres plus-values.') : '',
-        ...sells.map(x => (x.pea ? `${x.name} (PEA) : pas d’impôt tant que l’argent reste dans le PEA.`
-          : x.gain > 0 ? `${x.name} : impôt estimé ≈ ${euro(Math.round((x.gain * CTO_TAX) / 100))} sur ${euro(x.gain)} de plus-value (${String(CTO_TAX).replace('.', ',')} %, à vérifier), frais ≈ ${euro(x.fee)} : il vous reste ≈ ${euro(x.amount - Math.round((x.gain * CTO_TAX) / 100) - x.fee)}.`
-            : x.gain < 0 ? `${x.name} : moins-value de ${euro(-x.gain)}, déductible de vos plus-values de cette année et des 10 suivantes.` : '')),
-        cut.share < 1 ? `Ensuite, pause sur cette ligne jusqu’au ${inDays(today, SALE_PAUSE)} (règle 10).` : ''].filter(Boolean).join(' ');
-      order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule, how, limit: limitPrice('vente', q.price), cur: i.currency,
-        text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
-      const was = s.signalSince?.[i.isin];
-      if (cut.rule === 7 && !limitHit && !(was?.action === action && was.date < today)) Object.assign(order, { pending: true, text: `À confirmer demain : ${order.text}` });
-    }
-    return { ...base, action, score, missing, invalidation, confidence, order, facts };
-  });
+  const ctx = { p, risk, lines, held, blocked, byIsin, total, weight, etfValue, hasTargets };
+  const out = s.instruments.map(i => judge(s, today, i, ctx));
+  allocateBuys(s, today, out, ctx);
+  if (p.monthly > 0) monthlyPlan(s, today, out, lines, byIsin, isEtf);
+  return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
+}
 
+// The verdict of one title: its reasons with their points, the action they lead to, the order to give and the explanation.
+function judge(s, today, i, { p, risk, lines, held, blocked, byIsin, total, weight, etfValue, hasTargets }) {
+  const isHeld = held.has(i.isin), q = s.quotes[i.isin], reasons = [];
+  const add = (pts, text, asOf, source, rule) => reasons.push({ pts, text, asOf, source, rule });
+  const none = (rule, text) => ({ side: null, qty: 0, rule, text });
+  const base = { isin: i.isin, name: i.name, held: isHeld, reasons };
+  const fxOk = i.currency === 'EUR' || !isStale(s.fx[i.currency]?.asOf, today);
+  // a missing or stale price suspends the verdict instead of guessing
+  const odd = lines.find(l => l.isin === i.isin && l.suspect);
+  if (!q || q.currency !== i.currency || isStale(q.asOf, today) || !fxOk || odd) {
+    add(0, !q ? 'Aucun cours : actualisez ou saisissez-le.' : !fxOk ? `Taux de change ${i.currency} absent ou périmé.`
+      : odd ? `Cours à vérifier : ${q.price} ${q.currency} donnerait une ligne sans rapport avec les ${euro(odd.cost)} investis (mauvaise cotation ?).`
+        : `Cours du ${q.asOf} non à jour.`, q?.asOf, q?.source, 1);
+    return { ...base, action: 'Suspendu', score: 0, suspended: true, order: none(1, 'Aucune opération tant que le cours n’est pas à jour.') };
+  }
+  const t = p.targets[i.isin] ?? 0, own = lines.filter(l => l.isin === i.isin), cuts = [], allValue = byIsin[i.isin] ?? 0;
+  // what brings the title back to c % of the portfolio, the money going to the others
+  const backTo = c => (allValue ? Math.min(1, (allValue - (c * total) / 100) / allValue) : 0);
+  if (hasTargets && (t > 0 || isHeld)) {
+    if (blocked.length) add(0, `Allocation non calculée : cours manquant ou périmé pour ${blocked.join(', ')}.`, undefined, undefined, 1);
+    else {
+      const w = weight(i.isin), gap = t - w, far = Math.abs(gap);
+      const pts = far < p.driftPts ? 0 : Math.sign(gap) * (far >= 2 * p.driftPts ? 2 : 1);
+      add(pts, `Poids ${pct(w)} pour une cible de ${pct(t)}${pts ? ` : ${pts > 0 ? 'sous' : 'sur'}-pondéré de ${far.toFixed(1).replace('.', ',')} points` : ', dans la tolérance'}.`, undefined, undefined, 2);
+      if (pts < 0 && t > 0) cuts.push({ rule: 2, share: backTo(t), ls: own });
+    }
+  }
+  const tr = trend(s, i.isin), active = p.style === 'actif';
+  let takeProfit = 0;
+  if (tr) {
+    const gap = (q.price / tr.sma50 - 1) * 100, longUp = tr.first < tr.sma50;
+    // active style: a dip inside a rising trend is a chance to buy back, instead of a sell signal
+    if (active && gap <= -7 && longUp) add(2, `Repli de ${pct(-gap)} sous sa moyenne 50 jours alors que la tendance de fond monte : occasion de (r)acheter.`, tr.asOf, q.source, 6);
+    else {
+      const up = q.price >= tr.sma50;
+      add(up ? 1 : -1, `Cours ${up ? 'au-dessus' : 'en dessous'} de sa moyenne 50 jours (${tr.sma50.toFixed(2).replace('.', ',')} ${i.currency}).`, tr.asOf, q.source, 7);
+      if (tr.perf3m >= 5 || tr.perf3m <= -10) add(tr.perf3m > 0 ? 0.5 : -0.5, `${tr.perf3m > 0 ? '+' : ''}${pct(tr.perf3m)} sur 3 mois.`, tr.asOf, q.source, 7);
+    }
+    if (active && isHeld && gap >= 12) takeProfit = gap;
+  } else add(0, 'Tendance inconnue : historique insuffisant (actualisez en ligne).');
+  const recent = s.news.filter(n => n.isin === i.isin && dayNum(today) - dayNum(n.publishedAt) <= 14);
+  const tones = recent.map(n => n.sentiment).filter(Number.isFinite);
+  if (tones.length >= 2) {
+    const avg = tones.reduce((a, b) => a + b, 0) / tones.length;
+    add(avg > 0.2 ? 1 : avg < -0.2 ? -1 : 0, `Ton des actualités ${avg > 0.2 ? 'positif' : avg < -0.2 ? 'négatif' : 'neutre'} (${tones.length} articles sur 14 jours).`, recent[0].publishedAt, 'Marketaux', 7);
+  } else if (!recent.length && !s.discovery?.items?.[i.isin]) add(0, 'Aucune actualité récente.');
+  const found = s.discovery?.items?.[i.isin];
+  if (found) add(found.tone >= 0.2 ? 1 : 0, `Repéré par l’outil : ${found.docs} articles cette semaine, ton ${found.tone >= 0.2 ? 'positif' : 'plutôt neutre'} (${found.tone.toFixed(2).replace('.', ',')}).`, found.asOf, 'Marketaux', 7);
+  const notable = recent.filter(n => NOTABLE.test(n.title));
+  for (const n of notable) add(0, `À lire avant de décider : « ${n.title} »`, n.publishedAt, n.source, 8);
+  let limitHit = false, lossAlert = null;
+  const mine = lines.filter(l => l.isin === i.isin && l.cost > 0), gainAll = mine.reduce((a, l) => a + l.gain, 0);
+  const lastSale = l => s.ops.filter(o => o.accountId === l.accountId && o.isin === i.isin && o.qty < 0 && dayNum(today) - dayNum(o.date) < SALE_PAUSE).map(o => o.date).sort().at(-1);
+  const cooled = own.length > 0 && own.every(lastSale);
+  const resume = cooled ? new Date(Date.parse(own.map(lastSale).sort().at(-1)) + SALE_PAUSE * 864e5).toISOString().slice(0, 10) : null;
+  if (cooled) add(0, `Ligne déjà allégée : pas de nouvelle vente partielle avant le ${dayMonth(resume)}.`, undefined, undefined, 10);
+  const lastBuy = l => s.ops.filter(o => o.accountId === l.accountId && o.isin === i.isin && o.qty > 0 && !['Position existante', 'Position transférée'].includes(o.label)
+    && dayNum(today) - dayNum(o.date) < SALE_PAUSE).map(o => o.date).sort().at(-1);
+  const bought = own.map(lastBuy).filter(Boolean).sort().at(-1), buyResume = bought && new Date(Date.parse(bought) + SALE_PAUSE * 864e5).toISOString().slice(0, 10);
+  if (bought) add(0, `Ligne renforcée le ${dayMonth(bought)} : pas de nouvel achat avant le ${dayMonth(buyResume)}.`, undefined, undefined, 10);
+  if (takeProfit && gainAll > 0 && !cooled) { // active style: sell part of a strong rise, buy back later on a dip
+    limitHit = true;
+    const pea = mine.every(l => s.accounts.find(a => a.id === l.accountId)?.type === 'PEA');
+    add(-2, `Forte hausse : ${pct(takeProfit)} au-dessus de sa moyenne 50 jours, avec ${euro(gainAll)} de plus-value : prendre une partie des bénéfices (vendre environ un tiers).`
+      + (pea ? ' Sur un PEA, la vente n’est pas imposée tant que l’argent reste dedans.' : ' Sur un compte-titres, le gain réalisé est imposable.'), undefined, undefined, 6);
+    cuts.push({ rule: 6, share: 1 / 3, ls: own });
+  }
+  for (const l of mine) {
+    if (lastSale(l)) continue;
+    const gain = ((l.value - l.cost) * 100) / l.cost, hi = peakSince(s, i.isin, lineStart(s, l.accountId, i.isin));
+    const drop = hi ? ((hi - q.price) * 100) / hi : 0;
+    if (gain <= -risk.maxLoss) { lossAlert = Math.min(lossAlert ?? 0, gain); add(0, `Moins-value de ${pct(-gain)}, au-delà de votre perte maximale de ${risk.maxLoss} % (profil ${risk.label}) : à examiner, pas de vente automatique.`, undefined, undefined, 4); }
+    else if (p.horizon < 5 && gain > 0 && drop >= risk.trail) {
+      limitHit = true;
+      cuts.push({ rule: 5, share: 0.5, ls: [l] });
+      add(-2, `${pct(drop)} sous son plus haut (${hi.toFixed(2).replace('.', ',')} ${i.currency}) avec ${pct(gain)} de plus-value : stop suiveur de ${risk.trail} % (horizon ${p.horizon} ans).`, undefined, undefined, 5);
+    }
+  }
+  // concentration limit per line: above it, never « Renforcer », whatever the other signals say
+  const etf = isFund(i); // a broad fund spreads its own risk: no limit per line
+  const overCap = isHeld && !etf && p.maxWeight > 0 && !blocked.length && weight(i.isin) >= p.maxWeight;
+  if (overCap) add(0, `Poids ${pct(weight(i.isin))} : au-delà de votre limite de ${p.maxWeight} % par ligne, pas de renforcement.`, undefined, undefined, 3);
+  const score = Math.round(reasons.reduce((a, r) => a + r.pts, 0) * 10) / 10;
+  // a risk limit of the profile always leads to reducing the line, whatever the other signals say
+  const buyAt = etf ? (p.monthly > 0 ? Infinity : 1.5) : 2; // 13. with a monthly plan, ETFs are bought by the plan, not on signals
+  const ind0 = etf ? null : indicators(s, i.isin), downLong = !!ind0?.sma200 && q.price < ind0.sma200;
+  const sat = !etf && p.coreMin > 0 && total > 0 && ((total - etfValue) * 100) / total >= 100 - p.coreMin;
+  if (score >= buyAt && downLong) add(0, `Sous sa moyenne 200 jours (${ind0.sma200.toFixed(2).replace('.', ',')} ${i.currency}) : pas d’achat tant que la tendance de fond baisse.`, undefined, undefined, 11);
+  if (score >= buyAt && sat) add(0, `Actions à ${Math.round(((total - etfValue) * 100) / total)} % de vos titres, au-delà de vos ${100 - p.coreMin} % : pas de nouvel achat d’action.`, undefined, undefined, 12);
+  const canBuy = score >= buyAt && !downLong && !sat;
+  // 3. long term: price and news signals alone never sell, they ask for a look; risk rules and targets still act
+  const longSignal = isHeld && p.style !== 'actif' && !limitHit && !cooled && !cuts.length && score <= -2;
+  const action = notable.length || lossAlert != null || longSignal ? 'À examiner'
+    : isHeld ? (p.style === 'actif' && score <= -3 ? 'Vendre' : limitHit || (score <= -2 && !cooled) ? 'Alléger' : canBuy && !overCap && !bought ? 'Renforcer' : 'Conserver')
+      : canBuy ? 'Acheter' : 'Attendre';
+  // everything the verdict merged, in one sentence
+  const toneAvg = tones.length >= 2 ? tones.reduce((a, b) => a + b, 0) / tones.length : null, alloc = reasons.find(r => r.rule === 2);
+  const facts = [!tr ? 'tendance inconnue' : q.price >= tr.sma50 ? 'tendance haussière' : 'tendance baissière',
+    notable.length ? 'actualité importante à lire' : toneAvg != null ? `actualités ${toneAvg > 0.2 ? 'positives' : toneAvg < -0.2 ? 'négatives' : 'neutres'}` : recent.length ? `${recent.length} actualité(s) sans ton mesuré` : 'pas d’actualité récente',
+    lossAlert != null ? 'perte maximale dépassée' : cuts.some(c => c.rule === 5) ? 'stop suiveur atteint' : cuts.some(c => c.rule === 6) ? 'forte hausse à encaisser' : cooled ? 'ligne déjà allégée' : isHeld ? 'risque dans vos limites' : null,
+    overCap ? 'ligne au-delà de votre limite' : alloc && t > 0 ? (alloc.pts > 0 ? 'sous sa part visée' : alloc.pts < 0 ? 'au-dessus de sa part visée' : 'à sa part visée') : null].filter(Boolean).join(', ');
+  // the conclusion's frame: what it still lacks, what would overturn it, and how much data stands behind it
+  const ind = indicators(s, i.isin), level = ind?.sma200 ?? ind?.sma50, two = v => v.toFixed(2).replace('.', ',');
+  const missing = [!ind?.sma200 && 'Moins d’un an de cours : moyenne 200 jours indisponible.', !recent.length && 'Aucune actualité récente analysée.',
+    'Fondamentaux (chiffre d’affaires, résultats, valorisation) non analysés : pas de source gratuite fiable.'].filter(Boolean);
+  const invalidation = !level ? null : ['Vendre', 'Alléger'].includes(action)
+    ? `Revoir si le cours repasse au-dessus de ${two(ind.sma50 ?? level)} ${i.currency} (moyenne 50 jours).`
+    : `Revoir si le cours passe sous ${two(level)} ${i.currency} (moyenne ${ind.sma200 ? 200 : 50} jours)${notable.length ? ' ou après lecture de l’actualité signalée' : ''}.`;
+  const confidence = ind?.sma200 && tones.length >= 2 ? 'Élevée' : ind?.sma50 ? 'Moyenne' : 'Faible';
+  const worst = [...reasons].filter(r => r.pts < 0).sort((a, b) => a.pts - b.pts)[0]?.rule ?? 7;
+  let order = overCap ? none(3, 'Aucun achat : la ligne dépasse votre limite. Aucune vente demandée.') : none(7, 'Aucune opération : ni signal d’achat ni signal de vente.');
+  if (cooled && action === 'Conserver') order = none(10, `Aucune vente pour l’instant : ligne déjà allégée, prochaine révision le ${dayMonth(resume)}.`);
+  if ((downLong || sat) && score >= buyAt && ['Conserver', 'Attendre'].includes(action)) order = none(sat ? 12 : 11, sat
+    ? 'Aucun achat d’action : la part en actions dépasse votre objectif. Renforcez plutôt le cœur (ETF larges).' : 'Aucun achat : le cours est sous sa moyenne 200 jours, la tendance de fond baisse.');
+  if (bought && action === 'Conserver' && score >= buyAt) order = none(10, `Aucun renfort pour l’instant : ligne renforcée le ${dayMonth(bought)}, prochaine révision le ${dayMonth(buyResume)}.`);
+  if (action === 'À examiner') order = notable.length ? none(8, 'Aucune opération avant d’avoir lu l’actualité signalée.')
+    : lossAlert == null ? none(7, 'Signaux de baisse marqués : à examiner. En long terme, l’outil ne vend pas sur ces seuls signaux.')
+    : none(4, `Aucune vente automatique : perte de ${pct(-lossAlert)}, au-delà de votre limite de ${risk.maxLoss} %. Regardez les résultats et les actualités de la société avant de décider.`);
+  if (action === 'Vendre' || action === 'Alléger') order = sellOrder(s, today, i, q, p, { own, cuts, action, overCap, worst, limitHit, backTo });
+  return { ...base, action, score, missing, invalidation, confidence, order, facts };
+}
+
+// How much to sell, and where: the strongest rule triggered sets the size, a signal alone sells a third. Gives the order.
+function sellOrder(s, today, i, q, p, { own, cuts, action, overCap, worst, limitHit, backTo }) {
+  let order;
+  if (overCap && action === 'Alléger') cuts.push({ rule: 3, share: backTo(p.maxWeight), ls: own });
+  // the strongest rule triggered sets the size; a signal alone sells a third
+  // the same rule hit on several accounts (a stop on the PEA and on the CTO) acts on all of them at once
+  const merged = Object.values(cuts.reduce((m, c) => { m[c.rule] = m[c.rule] ? { ...m[c.rule], ls: [...new Set([...m[c.rule].ls, ...c.ls])] } : { ...c }; return m; }, {}));
+  const cut = action === 'Vendre' ? { rule: 7, share: 1, ls: own } : merged.sort((a, b) => b.share - a.share)[0] ?? { rule: worst, share: 1 / 3, ls: own };
+  const acc = l => s.accounts.find(x => x.id === l.accountId), pea = l => acc(l)?.type === 'PEA';
+  const mk = (l, x) => {
+    const a = acc(l), qty = cut.share === 1 ? l.qty : Math.min(l.qty, a?.fractional || !Number.isInteger(l.qty) ? Math.floor(x * 1000) / 1000 : Math.ceil(x - 1e-9));
+    return { accountId: l.accountId, name: a?.name ?? '?', qty, amount: Math.round((l.value * qty) / l.qty), gain: Math.round(((l.value - l.cost) * qty) / l.qty), pea: pea(l),
+      fee: a?.feeFixed ?? brokerFees(a?.institution)?.fixed ?? p.fee };
+  };
+  // held on a PEA and a CTO: in gain, sell on the PEA first (no tax there); in loss, on the CTO (the loss lowers the tax on other gains)
+  const inGain = cut.ls.reduce((n, l) => n + l.value - l.cost, 0) >= 0, mixed = cut.ls.some(pea) && cut.ls.some(l => !pea(l));
+  let left = cut.ls.reduce((n, l) => n + l.qty, 0) * cut.share;
+  const sells = (mixed && cut.share < 1 ? [...cut.ls].sort((a, b) => (pea(b) - pea(a)) * (inGain ? 1 : -1)).map(l => { const x = Math.min(l.qty, left); left -= x; return mk(l, x); })
+    : cut.ls.map(l => mk(l, l.qty * cut.share))).filter(x => x.qty > 0);
+  const how = [limitOrder('vente', q.price, i.currency),
+    mixed && cut.share < 1 ? (inGain ? 'Sur le PEA d’abord : la plus-value n’y est pas imposée.' : 'Sur le CTO d’abord : la moins-value y réduit l’impôt sur vos autres plus-values.') : '',
+    ...sells.map(x => (x.pea ? `${x.name} (PEA) : pas d’impôt tant que l’argent reste dans le PEA.`
+      : x.gain > 0 ? `${x.name} : impôt estimé ≈ ${euro(Math.round((x.gain * CTO_TAX) / 100))} sur ${euro(x.gain)} de plus-value (${String(CTO_TAX).replace('.', ',')} %, à vérifier), frais ≈ ${euro(x.fee)} : il vous reste ≈ ${euro(x.amount - Math.round((x.gain * CTO_TAX) / 100) - x.fee)}.`
+        : x.gain < 0 ? `${x.name} : moins-value de ${euro(-x.gain)}, déductible de vos plus-values de cette année et des 10 suivantes.` : '')),
+    cut.share < 1 ? `Ensuite, pause sur cette ligne jusqu’au ${inDays(today, SALE_PAUSE)} (règle 10).` : ''].filter(Boolean).join(' ');
+  order = { side: 'vente', sells, qty: sells.reduce((n, x) => n + x.qty, 0), amount: sells.reduce((n, x) => n + x.amount, 0), rule: cut.rule, how, limit: limitPrice('vente', q.price), cur: i.currency,
+    text: sells.map(x => `Vendre ${cut.share === 1 ? `les ${parts(x.qty)}` : parts(x.qty)} sur ${x.name} (≈ ${euro(x.amount)})`).join(' et ') };
+  const was = s.signalSince?.[i.isin];
+  if (cut.rule === 7 && !limitHit && !(was?.action === action && was.date < today)) Object.assign(order, { pending: true, text: `À confirmer demain : ${order.text}` });
+  return order;
+}
+
+// Where and how much to buy for each buy signal of the day: the envelope goes to the strongest, the others share the brokers' cash.
+function allocateBuys(s, today, out, { p, lines, byIsin, total }) {
   // this month's envelope goes to the strongest buy signal, within the remaining amount and the broker's cash
   const left = s.envelopes.filter(e => e.month === monthOf(today)).reduce((a, e) => a + envelopeLeft(s, e), 0);
   const signals = out.filter(x => x.action === 'Acheter' || x.action === 'Renforcer').sort((a, b) => b.score - a.score);
@@ -991,8 +1009,6 @@ export function suggestions(s, today) {
     const since = s.signalSince?.[pick.isin];
     if (pick.order?.qty && !(since?.action === pick.action && since.date < today)) Object.assign(pick.order, { pending: true, text: `À confirmer demain : ${pick.order.text}` });
   });
-  if (p.monthly > 0) monthlyPlan(s, today, out, lines, byIsin, isEtf);
-  return out.sort((a, b) => (a.suspended ?? 0) - (b.suspended ?? 0) || Math.abs(b.score) - Math.abs(a.score));
 }
 
 // 13. A fixed sum each month into the main broad ETF, whatever its price: once a purchase of an ETF is recorded this month, it is done.
@@ -1261,7 +1277,8 @@ export function importTrades(s, accountId, preview, today) {
 
 export function opsCsv(s) {
   const acc = Object.fromEntries(s.accounts.map(a => [a.id, a.name])), cat = Object.fromEntries(s.categories.map(c => [c.id, c.name]));
-  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  // a text starting with = + - @ would be run as a formula by Excel: it gets a leading apostrophe
+  const q = v => { const t = String(v ?? ''); return `"${(/^[=+\-@\t\r]/.test(t) ? `'${t}` : t).replace(/"/g, '""')}"`; };
   return ['date;compte;type;categorie;libelle;montant;prevue',
     ...s.ops.filter(o => !(o.planned && matchedIds(s).has(o.id))).sort((a, b) => a.date.localeCompare(b.date)).map(o =>
       [o.date, q(acc[o.accountId]), KINDS[o.kind], q(cat[o.categoryId]), q(o.label), (o.amount / 100).toFixed(2).replace('.', ','), o.planned ? 'oui' : 'non'].join(';'))].join('\n');

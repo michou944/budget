@@ -1,20 +1,17 @@
 // The only module that calls the network, and only once the user has enabled market data.
-// What leaves the phone: provider keys (Alpha Vantage, Marketaux), IP address, searched names, symbols and currencies.
+// What leaves the phone: provider key (Marketaux), IP address, searched names, symbols and currencies.
 // Quantities, amounts, accounts and operations never do.
 
 import { setHistory, addNews, pruneNews, newsQuery, valuation, positions, saveInstrument, deleteInstrument } from './budget.js';
 
-const AV = 'https://www.alphavantage.co/query', FX = 'https://api.frankfurter.dev/v1/latest', MX = 'https://api.marketaux.com/v1';
+const FX = 'https://api.frankfurter.dev/v1/latest', MX = 'https://api.marketaux.com/v1';
 const enc = encodeURIComponent;
-// Alpha Vantage free plan: 25 calls a day, shared between the user's titles and the daily market scan
-export const AV_PER_DAY = 25, SCAN_CALLS = 5;
-const localDay = () => new Date().toLocaleDateString('sv-SE');
-const avUsed = s => (s.avCalls?.date === localDay() ? s.avCalls.n : 0);
+// the daily market scan keeps at most this many new ideas
+export const SCAN_CALLS = 5;
 
 async function get(s, url, symbols, fetchFn, init) {
   const host = new URL(url).host;
   s.requestLog = [{ at: new Date().toISOString(), host, symbols }, ...s.requestLog].slice(0, 50); // never logs the key
-  if (host.includes('alphavantage')) s.avCalls = { date: localDay(), n: avUsed(s) + 1 };
   const r = await fetchFn(url, init);
   if (!r.ok) throw new Error(`${host} : HTTP ${r.status}`);
   return r.json();
@@ -68,8 +65,9 @@ const mx = (s, call, label, fetchFn) => {
 };
 
 const needKey = (m, key) => {
-  if (!m.enabled || !m[key]) throw new Error('Activez les données de marché et saisissez vos clés (onglet Bourse, « Clés et données envoyées »).');
+  if (!m.enabled || !m[key]) throw new Error('Activez les données de marché et saisissez vos clés (onglet Bourse → Plus → Réglages bourse).');
 };
+const needService = s => { if (!proxyOn(s)) throw new Error('Activez le service de cours (onglet Bourse → Plus → Réglages bourse).'); };
 
 // Free quotas are small: biggest positions first, then titles with a target, then the others.
 function byImportance(s, today) {
@@ -79,18 +77,13 @@ function byImportance(s, today) {
   return s.instruments.filter(i => !i.auto || val[i.isin] != null).sort((a, b) => (val[b.isin] ?? 0) - (val[a.isin] ?? 0) || (t[b.isin] ?? 0) - (t[a.isin] ?? 0));
 }
 
-const dailyCloses = j => Object.entries(j['Time Series (Daily)'] ?? {}).map(([d, v]) => [d, Number(v['4. close'])]);
-
 // « Tester » button: one cheap call that fails with HTTP 401 when the Marketaux key is wrong.
 export const checkNewsKey = (s, fetchFn = fetch) => mx(s, 'news/all?language=en&limit=1', ['test de la clé'], fetchFn);
 
-// Finds titles by name or ticker (one Alpha Vantage call).
+// Finds titles by name or ticker, through the price service.
 export async function searchSymbols(s, query, fetchFn = fetch) {
-  if (proxyOn(s)) return (await proxyGet(s, `/search?q=${enc(query)}`, [query], fetchFn)).map(x => ({ symbol: x.symbol, name: x.name, type: x.type, region: x.exchange, currency: '' }));
-  needKey(s.settings.market, 'avKey');
-  const j = await get(s, `${AV}?function=SYMBOL_SEARCH&keywords=${enc(query)}&apikey=${enc(s.settings.market.avKey)}`, [query], fetchFn);
-  if (j.Note || j.Information) throw new Error(`Alpha Vantage : ${j.Note || j.Information}`);
-  return (j.bestMatches ?? []).map(x => ({ symbol: x['1. symbol'], name: x['2. name'], type: x['3. type'], region: x['4. region'], currency: x['8. currency'] }));
+  needService(s);
+  return (await proxyGet(s, `/search?q=${enc(query)}`, [query], fetchFn)).map(x => ({ symbol: x.symbol, name: x.name, type: x.type, region: x.exchange, currency: '' }));
 }
 
 // One call per title and per day, biggest positions first, keeping SCAN_CALLS for the market scan.
@@ -121,20 +114,7 @@ export async function refreshMarket(s, today, fetchFn = fetch) {
     await refreshFx(s, today, fetchFn, errors); // a listing may have brought a new currency
     return errors;
   }
-  if (!m.avKey) return [...errors, 'Clé Alpha Vantage manquante : cours non actualisés'];
-  const todo = byImportance(s, today).filter(i => s.quotes[i.isin]?.fetchedAt !== today);
-  for (const [k, i] of todo.entries()) {
-    if (avUsed(s) >= AV_PER_DAY - SCAN_CALLS) { errors.push(`Quota gratuit du jour atteint : ${todo.length - k} petite(s) ligne(s) actualisée(s) demain.`); break; }
-    if (!i.symbol) { errors.push(`${i.name} : pas de symbole de cours (ouvrez sa fiche, « Trouver le cours »)`); continue; }
-    let j;
-    try { j = await get(s, `${AV}?function=TIME_SERIES_DAILY&outputsize=compact&symbol=${enc(i.symbol)}&apikey=${enc(m.avKey)}`, [i.symbol], fetchFn); }
-    catch (e) { errors.push(`${i.symbol} : ${e.message}`); continue; }
-    // Alpha Vantage does not return the currency: the instrument's listing currency is assumed
-    if (j['Time Series (Daily)']) setHistory(s, i.isin, dailyCloses(j), 'Alpha Vantage', today);
-    else if (j.Note || j.Information) { errors.push(`Alpha Vantage : ${j.Note || j.Information}`); break; } // quota hit: stop spending calls
-    else errors.push(`${i.symbol} : symbole inconnu chez Alpha Vantage`);
-  }
-  return errors;
+  return [...errors, 'Service de cours à configurer : cours non actualisés'];
 }
 
 // One Marketaux call per title and per day (free quota: 100 calls/day, 3 articles per call), searched by name.
@@ -166,7 +146,7 @@ const GENERIC = new Set(['the', 'adr', 'ads', 'inc', 'corp', 'group', 'holdings'
 const plainWords = t => String(t).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]/g, ' ');
 export const companyWord = name => plainWords(name).split(/\s+/).find(w => w.length > 2 && !GENERIC.has(w)) ?? '';
 
-// Marketaux symbol → Alpha Vantage symbol and listing currency; markets the app cannot price are skipped.
+// Marketaux symbol → the id of an idea (Alpha Vantage style, kept so ideas already stored keep their id) and listing currency; markets the app cannot price are skipped.
 // shortcut: US, Paris, Xetra and Amsterdam only; London (prices in pence) and others left out.
 const MARKETS = [[/^[A-Z]{1,5}$/, '', 'USD'], [/\.PA$/, '.PAR', 'EUR'], [/\.DE$/, '.DEX', 'EUR'], [/\.AS$/, '.AMS', 'EUR']];
 export function toAv(symbol) {
@@ -175,11 +155,11 @@ export function toAv(symbol) {
 }
 
 // Daily market scan: the listed companies most covered by the news this week with a positive tone (Marketaux),
-// whose price history is then fetched (Alpha Vantage). They become « idées » that the verdict engine judges
+// whose price history is then fetched (Yahoo, through the price service). They become « idées » that the verdict engine judges
 // like any other title. Yesterday's ideas make way for today's, unless they were bought in the meantime.
 export async function discover(s, today, fetchFn = fetch) {
-  const m = s.settings.market, proxy = proxyOn(s);
-  if (!proxy) needKey(m, 'avKey');
+  const m = s.settings.market;
+  needService(s);
   if (!newsOn(m)) needKey(m, 'newsKey');
   if (s.discovery?.date === today) return [];
   const week = new Date(Date.parse(today) - 7 * 864e5).toISOString().slice(0, 10);
@@ -202,19 +182,13 @@ export async function discover(s, today, fetchFn = fetch) {
   s.discovery = { date: today, items: {} };
   const errors = [];
   for (const x of picks) {
-    if (Object.keys(s.discovery.items).length >= SCAN_CALLS || (!proxy && avUsed(s) >= AV_PER_DAY)) break;
-    let closes, currency = x.currency;
-    try {
-      if (proxy) ({ closes, currency } = await proxyHistory(s, x.key, fetchFn)); // Marketaux and Yahoo share suffixes (.PA, .DE, .AS)
-      else {
-        const h = await get(s, `${AV}?function=TIME_SERIES_DAILY&outputsize=compact&symbol=${enc(x.symbol)}&apikey=${enc(m.avKey)}`, [x.symbol], fetchFn);
-        if (!h['Time Series (Daily)']) { if (h.Note || h.Information) { errors.push(`Alpha Vantage : ${h.Note || h.Information}`); break; } continue; }
-        closes = dailyCloses(h);
-      }
-    } catch (e) { errors.push(`${x.symbol} : ${e.message}`); continue; }
+    if (Object.keys(s.discovery.items).length >= SCAN_CALLS) break;
+    let closes, currency;
+    try { ({ closes, currency } = await proxyHistory(s, x.key, fetchFn)); } // Marketaux and Yahoo share suffixes (.PA, .DE, .AS)
+    catch (e) { errors.push(`${x.symbol} : ${e.message}`); continue; }
     const id = saveInstrument(s, { symbol: x.symbol, name: x.symbol, currency, type: 'Equity' });
-    Object.assign(s.instruments.find(i => i.isin === id), { auto: true, ...(proxy && { ysym: x.key }) });
-    setHistory(s, id, closes, proxy ? 'Yahoo (service perso)' : 'Alpha Vantage', today);
+    Object.assign(s.instruments.find(i => i.isin === id), { auto: true, ysym: x.key });
+    setHistory(s, id, closes, 'Yahoo (service perso)', today);
     s.discovery.items[id] = { docs: x.docs, tone: x.tone, asOf: today };
   }
   // one call to put company names on the ideas

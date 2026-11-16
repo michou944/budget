@@ -336,7 +336,7 @@ const views = {
 
   stock() {
     const t = today(), lines = B.valuation(S, t), mk = S.settings.market, sug = B.suggestions(S, t), pf = S.settings.profile;
-    const ready = mk.enabled && (mk.proxyUrl || mk.avKey), lr = S.lastRefresh;
+    const ready = mk.enabled && mk.proxyUrl, lr = S.lastRefresh;
     const held = sug.filter(x => x.held), noAdvice = held.filter(x => x.suspended).length;
     const envs = S.envelopes.filter(e => e.month === view.month), open = envs.filter(e => B.envelopeLeft(S, e) > 0);
     const left = envs.reduce((a, e) => a + B.envelopeLeft(S, e), 0);
@@ -869,7 +869,10 @@ const forms = {
       + `Avez-vous bien saisi le prix de revient TOTAL (et non par part) ? OK pour enregistrer tel quel, Annuler pour corriger.`)) throw new Error('Saisie annulée : corrigez le prix de revient total.');
     B.addHolding(S, f.accountId, f.isin, f.date, qty, cost);
   },
-  move: f => B.moveHolding(S, f.isin, f.from, f.to),
+  move: f => {
+    const cash = B.moveHolding(S, f.isin, f.from, f.to), v = eur(Math.abs(cash));
+    if (cash) alert(`Titre déplacé. Ses mouvements d’espèces ont suivi : ${accName(f.from)} ${cash < 0 ? 'récupère' : 'perd'} ${v}, ${accName(f.to)} ${cash < 0 ? 'perd' : 'gagne'} ${v}. Vérifiez les espèces des deux comptes.`);
+  },
   done: f => {
     for (const k of Object.keys(f).filter(k => k.startsWith('q_'))) {
       const acc = k.slice(2), qty = Number(String(f[k]).replace(/\s/g, '').replace(',', '.'));
@@ -1011,7 +1014,7 @@ render();
 notify();
 async function autoRefresh() {
   const m = S.settings.market, last = Date.parse(S.lastRefresh?.at ?? 0);
-  if (view.refreshing || !navigator.onLine || !m.enabled || !(m.proxyUrl || m.avKey) || Date.now() - last < 30 * 60e3) return;
+  if (view.refreshing || !navigator.onLine || !m.enabled || !m.proxyUrl || Date.now() - last < 30 * 60e3) return;
   const calm = () => !view.sheet && !document.activeElement?.matches('input, textarea, select'); // never redraw over typing
   view.refreshing = true; if (calm()) render();
   // no pop-up: problems are listed on the Bourse screen
